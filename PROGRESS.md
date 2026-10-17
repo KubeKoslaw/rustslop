@@ -8,14 +8,15 @@ Personal Wayland compositor in Rust on **Smithay 0.7.0**. Goal: Hyprland-style d
 Env: Linux (Gentoo), Wayland session, cargo 1.98.1, edition 2024. System libs present: wayland-server, xkbcommon.
 (Project folder was originally `~/Dokumenty/rusted`, now `~/Dokumenty/rustslop`.)
 
-## Current status: Phase 4 DONE (popups, layer-shell, decorations, clipboard, config) — branch `feat/phase-4-protocols-config`
-Phase 5 (real TTY/DRM session, libinput, multi-monitor, session entry, optional XWayland) is next. Real-keyboard (ydotool) path has still not been exercised by the agent.
+## Current status: Phase 5a DONE (calloop event loop) — branch `feat/phase-5a-calloop`
+Phase 5b (real TTY/DRM backend) is BLOCKED on a system package: `libseat` is not installed (`pkg-config libseat` fails; Smithay's `backend_session_libseat` needs it). User must run `sudo emerge sys-auth/seatd` (enable USE `elogind` since this machine runs elogind) — then add Smithay features `backend_drm, backend_gbm, backend_libinput, backend_session_libseat, backend_udev` and write `src/backend/tty.rs`. libinput, gbm, libdrm, udev, libdisplay-info are already present. 5b can only be fully tested on a spare TTY by the user (the agent cannot see a TTY); plan: compile-check + logs, user verifies.
 
 ## Layout
 - `Cargo.toml` — deps: `smithay` (features `backend_winit, renderer_glow, wayland_frontend, desktop`), `tracing`, `tracing-subscriber` (`env-filter`), `png`.
 - `src/config.rs` — TOML config (`$RUSTED_CONFIG` or `~/.config/rusted-wm/config.toml`; example in `config.example.toml`): gap, border, terminal, modifier (alt|super), colours, autostart, keybinds (merged over defaults, `"none"` removes). Parsed into `Binding`s. Invalid values are reported and fall back to defaults (never fatal). Unit tested.
 - `examples/layer_client.rs` — tiny layer-shell test bar (`WAYLAND_DISPLAY=rusted-1 ./target/debug/examples/layer_client top 40`).
-- `src/main.rs` — setup (Display, Output, State, sockets) + polling loop: winit events -> control socket commands -> render (`desktop::space::render_output`, borders as custom elements) -> frame callbacks -> clients -> submit -> offscreen screenshot if requested.
+- `src/main.rs` — builds State and a **calloop** `EventLoop<State>` with sources: Wayland display (dispatch_clients), listening socket (`rusted-N`), control socket, and the backend. Exits when `state.running` is false.
+- `src/backend/winit.rs` — nested backend: `Winit::new` (window + Output), `Winit::register` (winit input/resize source + 16 ms frame timer that renders via `render_output`, sends frame callbacks, submits, and serves pending screenshots). A tty backend should live beside it as `backend/tty.rs`.
 - `src/state.rs` — `State` struct + Wayland handler impls (Compositor, Shm, Output, XdgShell, Seat, DataDevice). `window_for_surface` searches all workspaces.
 - `src/wm.rs` — window management: `Workspace`/`Entry` (window, floating flag, float rect, border buffers), `add_window`, `remove_window`, `relayout`, focus (`focus_window/focus_top/focus_next/focus_dir`), `toggle_floating`, `switch_workspace`, `move_to_workspace`, mouse drags (`begin_drag/update_drag`), `border_elements`. Only the current workspace's windows are mapped in the `Space`. Floating windows use z-index Shell+1 so they stay above tiled ones. `relayout` re-maps in existing z-order (Space::map_element raises).
 - `src/layout.rs` — PURE layout math (`dwindle`, `default_float_rect`) with unit tests (`cargo test`). Add new layouts here.
@@ -24,6 +25,8 @@ Phase 5 (real TTY/DRM session, libinput, multi-monitor, session entry, optional 
 - Constants (gap 12, border 2, colours, 9 workspaces) are in `src/wm.rs`.
 
 ## Testing (important for AI agents)
+**Run `tools/smoke.sh [outdir]` after every change** — builds, starts the nested compositor, and checks tiling, floating, focus, drag, workspaces, close, clipboard and layer-shell (12 checks, exit 0 = all pass). Screenshots go to outdir.
+
 No input devices are needed. Start the compositor (opens a nested window), then drive it:
 ```bash
 ./target/debug/rusted-wm &                  # prints control socket path: $XDG_RUNTIME_DIR/rusted-N-ctl
@@ -65,6 +68,12 @@ Real keyboard test: `ydotool` is installed but needs `ydotoold` running and `/de
 - Also added: viewporter, config file + live reload (`reload` command/keybind), autostart, child processes are reaped by a waiter thread (fixes zombies).
 - Config test coverage: 4 unit tests (defaults, overrides/removal, bad input, colours). Live reload verified (gap 12->30->0, bad colour reported).
 - Pitfall for agents: never `pkill -f <pattern>` where the pattern appears in your own command line — it kills the shell. Use `pkill -x name`.
+
+### Phase 5a — calloop refactor (2026-10-17)
+- Replaced the hand-written polling loop (sleep 4 ms) with a calloop `EventLoop<State>`; backend code moved to `src/backend/winit.rs`; frame callbacks/popup cleanup moved to `State::send_frames` (wm.rs); `State.pending_shot` carries screenshot requests from the control socket to the backend.
+- Why: libinput, libseat sessions, udev and DRM page-flip events are all calloop event sources, so the TTY backend needs this.
+- Gotchas: `Control` implements `AsFd` (via its listener) so it can be a `Generic` source; the display source flushes clients after each dispatch; a frame flushes clients before `submit` (swap may block).
+- Verified with the new `tools/smoke.sh`: 12/12 checks pass (same behaviour as before the refactor).
 
 ## Known limitations / TODO
 - Polling loop with sleep instead of calloop (planned to move to calloop in Phase 2).
