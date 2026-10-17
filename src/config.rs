@@ -675,7 +675,7 @@ mod tests {
     fn shipped_rice_config_is_valid() {
         let (c, problems) = Config::parse(include_str!("../contrib/config.rice.toml"), true);
         assert!(problems.is_empty(), "{problems:?}");
-        assert!(c.autostart.iter().any(|a| a == "waybar"));
+        assert!(c.autostart.iter().any(|a| a.contains("waybar")));
         // Media keys have no modifier and must be matched on their own.
         assert!(c.bindings.iter().any(|b| !b.logo && !b.alt && !b.ctrl && !b.shift));
     }

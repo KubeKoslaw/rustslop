@@ -129,16 +129,21 @@ impl State {
                 Some("j") => self.run_action(Action::FocusDir(0, 1)),
                 _ => return err("focus h|j|k|l"),
             },
+            // `ws next|prev [OUTPUT]`: relative to that monitor's workspace (default: the focused one).
             Some("ws") if matches!(parts.get(1).copied(), Some("next" | "prev")) => {
                 let n = crate::wm::WORKSPACE_COUNT;
-                let cur = State::ws_number(self.current_ws());
+                let mon = self.mon_by_name(parts.get(2).copied());
+                let cur = State::ws_number(self.outputs[mon].ws);
                 let target = if parts[1] == "next" { (cur + 1) % n } else { (cur + n - 1) % n };
-                self.run_action(Action::Workspace(target));
+                self.switch_on(mon, target);
             }
             Some("ws-json") => return Reply::Text(self.workspaces_json(parts.get(1).copied())),
             Some("ws") => match num(1) {
-                Some(n) if n >= 1.0 => self.run_action(Action::Workspace(n as usize - 1)),
-                _ => return err("ws N (1-9)"),
+                Some(n) if n >= 1.0 => {
+                    let mon = self.mon_by_name(parts.get(2).copied());
+                    self.switch_on(mon, n as usize - 1);
+                }
+                _ => return err("ws N [OUTPUT] (1-9)"),
             },
             Some("mv") => match num(1) {
                 Some(n) if n >= 1.0 => self.run_action(Action::MoveToWorkspace(n as usize - 1)),
@@ -189,9 +194,26 @@ impl State {
                 _ => return err("mvout h|j|k|l"),
             },
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, volume up|down|mute|mic-mute, ws N|next|prev, ws-json [OUTPUT], mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, volume up|down|mute|mic-mute, ws N|next|prev [OUTPUT], ws-json [OUTPUT], mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
         }
         ok()
+    }
+
+    /// Monitor called `name`; the focused one when `name` is absent or unknown (a Waybar config
+    /// template still holding the `@OUTPUT@` placeholder then behaves sensibly).
+    fn mon_by_name(&self, name: Option<&str>) -> usize {
+        name.and_then(|n| self.outputs.iter().position(|m| m.output.name() == n)).unwrap_or(self.focused)
+    }
+
+    /// Show workspace number `n` on monitor `mon`; another monitor than the focused one also
+    /// takes the focus (a click or scroll on its bar counts as being there).
+    fn switch_on(&mut self, mon: usize, n: usize) {
+        if mon == self.focused {
+            self.run_action(Action::Workspace(n));
+        } else if n < crate::wm::WORKSPACE_COUNT {
+            let idx = self.outputs[mon].slot * crate::wm::WORKSPACE_COUNT + n;
+            self.show_workspace(idx);
+        }
     }
 
     /// Waybar `custom` module payload (`return-type: json`): occupied and visible workspaces with

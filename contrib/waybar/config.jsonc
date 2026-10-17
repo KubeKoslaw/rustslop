@@ -1,6 +1,11 @@
-// Example Waybar config for rusted-wm. Copy to ~/.config/waybar/ and adjust the path to ctl.py.
+// Example Waybar config for rusted-wm. Copy to ~/.config/waybar/.
+//
 // rusted-wm has no sway/hyprland IPC, so the workspace indicator is a `custom` module fed by the
-// compositor's control socket (`ctl.py ws-json`). Scroll over it to change workspace.
+// compositor's control socket (`rusted-wm ctl ws-json`). Scroll over it to change workspace.
+//
+// "@OUTPUT@" is replaced with the monitor's name by `rusted-waybar`, which starts one bar per
+// monitor so each shows ITS OWN workspaces (every monitor has its own 1-9). Started by plain
+// `waybar`, the placeholder is unknown to the compositor and the focused monitor is shown.
 {
   "layer": "top",
   "position": "top",
@@ -10,11 +15,11 @@
   "modules-right": ["pulseaudio", "network", "cpu", "memory", "battery", "tray"],
 
   "custom/workspaces": {
-    "exec": "$HOME/Dokumenty/rustslop/tools/ctl.py ws-json",
+    "exec": "rusted-wm ctl ws-json @OUTPUT@",
     "return-type": "json",
     "interval": 1,
-    "on-scroll-up": "$HOME/Dokumenty/rustslop/tools/ctl.py ws prev",
-    "on-scroll-down": "$HOME/Dokumenty/rustslop/tools/ctl.py ws next"
+    "on-scroll-up": "rusted-wm ctl ws prev @OUTPUT@",
+    "on-scroll-down": "rusted-wm ctl ws next @OUTPUT@"
   },
   "clock": { "format": "{:%a %d %b  %H:%M}" },
   "cpu": { "format": "cpu {usage}%" },

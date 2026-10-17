@@ -180,7 +180,17 @@ for n in 1 2 3 4 1 2 3 4; do $CTL ws $n >/dev/null; done
 sleep 1
 check "workspace cycling on monitor 1 ends on 4 there" $($CTL info | grep '^output ' | sed -n 1p | grep -q "current_ws=4"; echo $?)
 check "monitor 2 keeps its own workspace (no swapping)" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)
-$CTL ws 1 >/dev/null
+# per-monitor control: `ws N OUTPUT` / `ws next OUTPUT` act on that monitor (and focus it)
+$CTL ws 3 virtual-2 >/dev/null; sleep 1
+check "ws N OUTPUT switches the named monitor" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=3"; echo $?)
+check "...and leaves the other monitor alone" $($CTL info | grep '^output ' | sed -n 1p | grep -q "current_ws=4"; echo $?)
+$CTL ws next virtual-2 >/dev/null; sleep 1
+check "ws next OUTPUT moves that monitor on" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=4"; echo $?)
+check "ws-json OUTPUT reports that monitor's workspace" $($CTL ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
+check "rusted-wm ctl reaches the compositor (no Python needed)" $(WAYLAND_DISPLAY=$SOCK ./target/debug/rusted-wm ctl ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
+RUSTED_WM="$PWD/target/debug/rusted-wm" contrib/rusted-waybar --config contrib/waybar/config.jsonc --print HDMI-A-1 DP-1 > "$OUT/waybar-bars.json"
+check "rusted-waybar generates one bar per monitor with its name" $(python3 -c "import json,sys; b=json.load(open('$OUT/waybar-bars.json')); assert [x['output'] for x in b]==['HDMI-A-1','DP-1'] and 'ws-json DP-1' in b[1]['custom/workspaces']['exec'] and '@OUTPUT@' not in json.dumps(b)"; echo $?)
+$CTL ws 1 virtual-2 >/dev/null; $CTL output focus 1 >/dev/null; $CTL ws 1 >/dev/null
 check "second output appears at x=$W0" $($CTL info | grep '^output ' | sed -n 2p | grep -q "800x600 at $W0,0"; echo $?)
 check "second output starts on its own workspace 1" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)
 $CTL output focus 2 >/dev/null; $CTL spawn >/dev/null; sleep 3

@@ -30,7 +30,26 @@ const USAGE: &str = "usage: rusted-wm config <command>
   unbind KEYS [--disable]      remove your bind (back to the default); --disable turns a default off
   autostart list|add CMD|remove N
   dump                         everything above as one JSON document (used by rusted-settings)
+(also: rusted-wm ctl COMMAND...   send a control command, e.g. `ctl ws-json DP-1`, `ctl info`)
 options: --no-reload   do not tell a running compositor to reload";
+
+/// `rusted-wm ctl COMMAND...`: talk to the running compositor (what tools/ctl.py does, without Python).
+pub fn ctl(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("usage: rusted-wm ctl COMMAND [ARGS...]   (e.g. info, ws 2, ws-json DP-1, volume up)");
+        return 2;
+    }
+    match send_command(&args.join(" ")) {
+        Some(reply) => {
+            outln!("{}", reply.trim_end());
+            0
+        }
+        None => {
+            eprintln!("error: no running rusted-wm control socket found");
+            1
+        }
+    }
+}
 
 pub fn run(args: &[String]) -> i32 {
     let no_reload = args.iter().any(|a| a == "--no-reload");
@@ -255,7 +274,7 @@ fn modify(path: &Path, no_reload: bool, edit: impl FnOnce(&str) -> Result<String
         outln!("  warning: {p}");
     }
     if !no_reload {
-        match reload() {
+        match send_command("reload") {
             Some(reply) if reply.trim() == "ok" => outln!("compositor reloaded"),
             Some(reply) => outln!("compositor reloaded: {}", reply.trim()),
             None => outln!("(no running compositor found; the change applies at the next start)"),
@@ -264,8 +283,9 @@ fn modify(path: &Path, no_reload: bool, edit: impl FnOnce(&str) -> Result<String
     Ok(())
 }
 
-/// Ask the compositor to re-read its config over the control socket, if one is running.
-fn reload() -> Option<String> {
+/// Send one control command to the running compositor and return its reply (None if there is no
+/// compositor): its own `$WAYLAND_DISPLAY` socket first, else the newest `rusted-*-ctl`.
+pub fn send_command(command: &str) -> Option<String> {
     let dir = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").ok()?);
     let own = std::env::var("WAYLAND_DISPLAY").ok().map(|d| dir.join(format!("{d}-ctl"))).filter(|p| p.exists());
     let socket = own.or_else(|| {
@@ -281,7 +301,8 @@ fn reload() -> Option<String> {
     })?;
     let mut stream = UnixStream::connect(socket).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    stream.write_all(b"reload\n").ok()?;
+    stream.write_all(command.as_bytes()).ok()?;
+    stream.write_all(b"\n").ok()?;
     let mut reply = String::new();
     stream.read_to_string(&mut reply).ok()?;
     Some(reply)

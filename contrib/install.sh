@@ -23,6 +23,9 @@ install)
     fi
     install -Dm755 "$BIN" "$DESTDIR$PREFIX/bin/rusted-wm"
     install -Dm755 contrib/rusted-session "$DESTDIR$PREFIX/bin/rusted-session"
+    install -Dm755 contrib/rusted-waybar "$DESTDIR$PREFIX/bin/rusted-waybar"
+    install -Dm644 contrib/waybar/config.jsonc "$DESTDIR$PREFIX/share/rusted-wm/waybar/config.jsonc"
+    install -Dm644 contrib/waybar/style.css "$DESTDIR$PREFIX/share/rusted-wm/waybar/style.css"
     # The GTK settings app is optional: installed when it was built (cargo build --release --workspace).
     SETTINGS_BIN=${SETTINGS_BIN:-target/release/rusted-settings}
     if [ -x "$SETTINGS_BIN" ]; then
@@ -42,8 +45,9 @@ install)
 uninstall)
     rm -f "$DESTDIR$PREFIX/bin/rusted-wm" "$DESTDIR$PREFIX/bin/rusted-session" \
         "$DESTDIR$PREFIX/bin/rusted-settings" "$DESTDIR$PREFIX/share/applications/rusted-settings.desktop" \
+        "$DESTDIR$PREFIX/bin/rusted-waybar" "$DESTDIR$PREFIX/share/rusted-wm/waybar/config.jsonc" "$DESTDIR$PREFIX/share/rusted-wm/waybar/style.css" \
         "$DESTDIR$SESSIONS/rusted.desktop" "$DESTDIR$PREFIX/share/doc/rusted-wm/config.example.toml"
-    rmdir "$DESTDIR$PREFIX/share/doc/rusted-wm" 2>/dev/null || true
+    rmdir "$DESTDIR$PREFIX/share/doc/rusted-wm" "$DESTDIR$PREFIX/share/rusted-wm/waybar" "$DESTDIR$PREFIX/share/rusted-wm" 2>/dev/null || true
     echo "removed rusted-wm session files"
     ;;
 *)

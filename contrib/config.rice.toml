@@ -13,7 +13,7 @@ autostart = [
   "sh -c 'pgrep -x wireplumber >/dev/null || wireplumber'",
   "sh -c 'pgrep -x pipewire-pulse >/dev/null || pipewire-pulse'",
   "swaybg -c '#1e2030'",
-  "waybar",
+  "rusted-waybar",   # one bar per monitor, each with its own workspaces (plain "waybar" works too)
   "mako",
   "wl-paste --watch cliphist store",
 ]
