@@ -24,8 +24,12 @@ install)
     install -Dm755 "$BIN" "$DESTDIR$PREFIX/bin/rusted-wm"
     install -Dm755 contrib/rusted-session "$DESTDIR$PREFIX/bin/rusted-session"
     install -Dm755 contrib/rusted-waybar "$DESTDIR$PREFIX/bin/rusted-waybar"
-    install -Dm644 contrib/waybar/config.jsonc "$DESTDIR$PREFIX/share/rusted-wm/waybar/config.jsonc"
-    install -Dm644 contrib/waybar/style.css "$DESTDIR$PREFIX/share/rusted-wm/waybar/style.css"
+    if [ -f contrib/waybar/config.jsonc ] && [ -f contrib/waybar/style.css ]; then
+        install -Dm644 contrib/waybar/config.jsonc "$DESTDIR$PREFIX/share/rusted-wm/waybar/config.jsonc"
+        install -Dm644 contrib/waybar/style.css "$DESTDIR$PREFIX/share/rusted-wm/waybar/style.css"
+    else
+        echo "note: contrib/waybar is personal (gitignored), skipping bar templates"
+    fi
     # The GTK settings app is optional: installed when it was built (cargo build --release --workspace).
     SETTINGS_BIN=${SETTINGS_BIN:-target/release/rusted-settings}
     if [ -x "$SETTINGS_BIN" ]; then

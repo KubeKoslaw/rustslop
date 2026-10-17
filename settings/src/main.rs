@@ -467,7 +467,7 @@ fn theme_page(ctx: &Shared) -> gtk::ScrolledWindow {
         }
         None => {
             generate.set_sensitive(false);
-            generate.set_tooltip_text(Some("palette.py not found — run contrib/rice/install.py"));
+            generate.set_tooltip_text(Some("palette.py not found — set RUSTED_PALETTE or install the rice helpers"));
         }
     }
     body.append(&generate);

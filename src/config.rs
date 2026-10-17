@@ -77,7 +77,7 @@ pub struct OutputSettings {
     pub position: String,
 }
 
-/// Desktop wallpaper, applied by the session's wallpaper helper (`contrib/rice/wallpaper.py`).
+/// Desktop wallpaper, applied by the session's wallpaper helper (a local rice script, not tracked).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Wallpaper {
@@ -860,11 +860,9 @@ mod tests {
             let documented = example.contains(&format!("{} =", x.key)) || example.contains(&format!("[{}]", x.key));
             assert!(documented, "config.example.toml does not document `{}`", x.key);
         }
-        // And the shipped examples produce no unknown-key complaints.
-        for text in [example, include_str!("../contrib/config.rice.toml")] {
-            let table: toml::Table = text.parse().unwrap();
-            assert!(unknown_key_problems(&table).is_empty());
-        }
+        // And the example produces no unknown-key complaints.
+        let table: toml::Table = example.parse().unwrap();
+        assert!(unknown_key_problems(&table).is_empty());
     }
 
     #[test]
@@ -970,15 +968,6 @@ mod tests {
         assert_eq!(rgb(c.focused), (0x73, 0xa6, 0xff));
         assert!(c.pywal_file.is_some());
         unsafe { std::env::remove_var("RUSTED_WAL_FILE") };
-    }
-
-    #[test]
-    fn shipped_rice_config_is_valid() {
-        let (c, problems) = Config::parse(include_str!("../contrib/config.rice.toml"), true);
-        assert!(problems.is_empty(), "{problems:?}");
-        assert!(c.autostart.iter().any(|a| a.contains("waybar")));
-        // Media keys have no modifier and must be matched on their own.
-        assert!(c.bindings.iter().any(|b| !b.logo && !b.alt && !b.ctrl && !b.shift));
     }
 
     #[test]

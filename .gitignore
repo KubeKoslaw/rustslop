@@ -7,3 +7,8 @@
 # tooling scratch output
 /.scratch/
 __pycache__/
+
+# personal appearance/rice (kept locally only, never published)
+/contrib/rice/
+/contrib/waybar/
+/contrib/config.rice.toml

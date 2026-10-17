@@ -128,7 +128,7 @@ $CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "curren
 
 # ---- config tooling ----
 check "--dump-schema prints valid JSON with settings and actions" $(./target/debug/rusted-wm --dump-schema | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['settings'] and d['actions']"; echo $?)
-check "--check-config accepts the shipped configs" $(./target/debug/rusted-wm --check-config contrib/config.rice.toml >/dev/null && ./target/debug/rusted-wm --check-config config.example.toml >/dev/null; echo $?)
+check "--check-config accepts the example config" $(./target/debug/rusted-wm --check-config config.example.toml >/dev/null; echo $?)
 printf '[general]\ngapp = 3\n' > "$OUT/bad.toml"
 check "--check-config fails on a config with problems" $(! ./target/debug/rusted-wm --check-config "$OUT/bad.toml" >/dev/null; echo $?)
 
@@ -208,8 +208,16 @@ $CTL ws next virtual-2 >/dev/null; sleep 1
 check "ws next OUTPUT moves that monitor on" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=4"; echo $?)
 check "ws-json OUTPUT reports that monitor's workspace" $($CTL ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
 check "rusted-wm ctl reaches the compositor (no Python needed)" $(WAYLAND_DISPLAY=$SOCK ./target/debug/rusted-wm ctl ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
-RUSTED_WM="$PWD/target/debug/rusted-wm" contrib/rusted-waybar --config contrib/waybar/config.jsonc --print HDMI-A-1 DP-1 > "$OUT/waybar-bars.json"
-check "rusted-waybar generates one bar per monitor with its name" $(python3 -c "import json,sys; b=json.load(open('$OUT/waybar-bars.json')); assert [x['output'] for x in b]==['HDMI-A-1','DP-1'] and 'workspace DP-1 1' in b[1]['custom/ws1']['exec'].replace(chr(39), '') and 'switch DP-1 1' in b[1]['custom/ws1']['on-click'].replace(chr(39), '') and '@OUTPUT@' not in json.dumps(b)"; echo $?)
+cat > "$OUT/waybar-template.jsonc" <<'JSON'
+// minimal template for the test; the real bar theme is local-only
+{
+  "output": "@OUTPUT@",
+  "modules-left": ["custom/ws1"],
+  "custom/ws1": { "exec": "rusted-wm ctl ws-json @OUTPUT@", "on-click": "rusted-wm ctl ws 1 @OUTPUT@" }
+}
+JSON
+RUSTED_WM="$PWD/target/debug/rusted-wm" contrib/rusted-waybar --config "$OUT/waybar-template.jsonc" --print HDMI-A-1 DP-1 > "$OUT/waybar-bars.json"
+check "rusted-waybar generates one bar per monitor with its name" $(python3 -c "import json; b=json.load(open('$OUT/waybar-bars.json')); assert [x['output'] for x in b]==['HDMI-A-1','DP-1'] and 'ws-json DP-1' in b[1]['custom/ws1']['exec'] and 'ws 1 DP-1' in b[1]['custom/ws1']['on-click'] and '@OUTPUT@' not in json.dumps(b)"; echo $?)
 $CTL ws 1 virtual-2 >/dev/null; $CTL output focus 1 >/dev/null; $CTL ws 1 >/dev/null
 check "second output appears at x=$W0" $($CTL info | grep '^output ' | sed -n 2p | grep -q "800x600 at $W0,0"; echo $?)
 check "second output starts on its own workspace 1" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)

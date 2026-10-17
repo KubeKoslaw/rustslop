@@ -32,36 +32,23 @@ doas contrib/install.sh        # or sudo; use `uninstall` to remove
 ```
 Then pick **Rusted** in your display manager (SDDM etc.), or run `exec rusted-session` from a TTY. Session log: `~/.local/state/rusted-wm/session.log`.
 
-## Appearance and rice
-The shipped defaults keep the old rectangular look. The rice preset enables the graphite/lavender theme
-together with rounded corners, shadows, blur and animations:
+## Appearance and theming
+The defaults keep the rectangular look. `[appearance]` turns on rounded corners, borders that follow the
+curve, shadows, backdrop blur and animations. `[colors]` is either a fixed palette or pywal: with
+`pywal = true` the compositor follows `~/.cache/wal/colors.json`, and the Theme page in `rusted-settings`
+can regenerate that palette from the current wallpaper. `[wallpaper] path`/`mode` is applied by the session's
+wallpaper helper. `config.example.toml` documents every key and `rusted-wm --check-config FILE` validates a
+file.
 
-```bash
-cargo build --release --workspace      # compositor, session launcher and the GTK4 settings app
-python3 contrib/rice/install.py --dry-run
-python3 contrib/rice/install.py        # backs up every file it touches, then installs
-```
-It checks dependencies first, edits `~/.config/rusted-wm/config.toml` through `rusted-wm config` (so comments
-and layout are preserved) and validates the result with `--check-config`. Restart the session afterwards.
-To undo: `python3 contrib/rice/install.py --restore ~/.config/rusted-rice-backups/<stamp>/manifest.json`.
-Everything installed by the preset lives in `~/.config/rusted-rice` plus the native config dirs it lists.
-
-`fastfetch` is themed to match (a monochrome edge-aware ASCII portrait of the Rusted mascot, graphite/lavender keys and inline RAM/DISK bars; truecolor and braille logo variants are shipped too) and starts in
-every interactive **foot** shell: the installer drops the config in `~/.config/fastfetch`, the snippet in
-`~/.config/rusted-rice/fastfetch.bash`, and adds one source line to `~/.bashrc` (`--no-bashrc` opts out).
-Other terminals and non-interactive shells stay quiet.
-
-The **Theme** page (`rusted-settings --page=theme`) has a pywal switch: when it is on, window borders, the
-desktop background and Waybar follow the current wallpaper. `contrib/rice/palette.py` writes
-`~/.cache/wal/colors.json` (using `wal` when it is installed, otherwise a built-in Pillow extractor), the
-wallpaper helper regenerates it whenever the wallpaper changes, and everything reloads live.
+The graphite/lavender desktop used on this machine — `contrib/rice/`, `contrib/waybar/` and
+`contrib/config.rice.toml` — is personal and **gitignored**, with its own local installer; it is not part of
+the published tree. That rice also themes foot, fuzzel, mako, swaylock and fastfetch.
 
 `rusted-settings` (built from the workspace) edits the same config through the same CLI, with schema-driven
 pages for general options, keybinds, default apps, input, colors, wallpaper, appearance and audio. The
-Wallpaper page previews the current image, offers a file picker and thumbnails of everything in
-`~/.config/rusted-rice/wallpapers`, `~/Pictures/Wallpapers` and `/usr/share/backgrounds`. Changes are
-applied live: the rice's `wallpaper.py` watches `[wallpaper]` and restarts swaybg (`--page=wallpaper`
-opens that page directly).
+Wallpaper page previews the current image, offers a file picker and thumbnails of
+`~/.config/rusted-rice/wallpapers`, `~/Pictures/Wallpapers` and `/usr/share/backgrounds`; changes are applied
+live by the local wallpaper helper. The Theme page has the pywal switch and the colour mapping.
 
 ## Testing
 `tools/smoke.sh` drives a nested instance through its control socket (`tools/ctl.py`) and checks tiling,
