@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install/restore the Rusted rice. Only explicitly listed files are ever touched.
 
-Usage: python3 contrib/rice/install.py [--config-home DIR] [--wm PATH] [--dry-run]
+Usage: python3 contrib/rice/install.py [--config-home DIR] [--wm PATH] [--dry-run] [--no-bashrc]
        python3 contrib/rice/install.py --restore MANIFEST
 """
 import argparse
@@ -21,9 +21,11 @@ def digest(data): return hashlib.sha256(data).hexdigest()
 
 def write_atomic(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
         stream.write(data); temporary = Path(stream.name)
     os.replace(temporary, path)
+    os.chmod(path, mode)
 
 def restore(manifest):
     manifest = Path(manifest).resolve()
@@ -44,6 +46,7 @@ def main():
     parser.add_argument('--config-home', type=Path, default=Path(os.environ.get('XDG_CONFIG_HOME', Path.home()/'.config')))
     parser.add_argument('--wm', type=Path, default=SOURCE.parents[1]/'target/debug/rusted-wm')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--no-bashrc', action='store_true', help='do not add the fastfetch snippet to ~/.bashrc')
     parser.add_argument('--restore', type=Path)
     args = parser.parse_args()
     if args.restore: return restore(args.restore)
@@ -59,10 +62,11 @@ def main():
         if f.is_file() and '__pycache__' not in f.parts and f.name not in ('install.py','README.md'):
             rel=f.relative_to(SOURCE)
             # App configs go to their native location; support files live in rusted-rice.
-            app=rel.parts[0] in ('fuzzel','mako','foot','swaylock','gtk-3.0','gtk-4.0','qt5ct','qt6ct')
+            app=rel.parts[0] in ('fuzzel','mako','foot','swaylock','gtk-3.0','gtk-4.0','qt5ct','qt6ct','fastfetch')
             dst=config_home/rel if app else rice/rel
             data=f.read_bytes()
             if f.suffix in ('.conf','.ini'): data=data.replace(b'@RICE@',str(rice).encode())
+            if f.suffix=='.jsonc': data=data.replace(b'~/.config/fastfetch/',str(config_home/'fastfetch').encode()+b'/')
             payload[dst]=data
     with tempfile.TemporaryDirectory(prefix='rusted-rice-stage-') as tmp:
         tmp=Path(tmp)
@@ -103,6 +107,17 @@ def main():
     else:
         print('Optional: qt6ct/qt5ct is absent; Qt palette files are installed for use after installing the platform theme.')
     payload[rice/'session.env']=env_text.encode()
+    # Fastfetch on every interactive foot shell. The snippet lives in rusted-rice; this only
+    # adds one source line to ~/.bashrc (backed up and restorable like every other file).
+    if not args.no_bashrc:
+        bashrc=Path.home()/'.bashrc'; marker='# rusted rice: fastfetch in interactive foot shells'
+        try: current=bashrc.read_text()
+        except FileNotFoundError: current=None
+        if current is None:
+            print('Note: no ~/.bashrc; add `. '+str(rice/'fastfetch.bash')+'` to your shell config.')
+        elif marker not in current:
+            line=f'{marker}\n[ -f {shlex.quote(str(rice/"fastfetch.bash"))} ] && . {shlex.quote(str(rice/"fastfetch.bash"))}\n'
+            payload[bashrc]=(current.rstrip('\n')+'\n\n'+line).encode()
     if args.dry_run:
         print('Would install:\n'+'\n'.join(map(str,payload)))
         return

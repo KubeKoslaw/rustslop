@@ -1,0 +1,32 @@
+// Rusted Soft Minimal fastfetch theme: graphite/lavender, compact, no OS-logo noise.
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/master/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    "source": "~/.config/fastfetch/logo.txt",
+    "padding": { "top": 0, "left": 1, "right": 2 },
+    "color": { "1": "magenta", "2": "bright_black" },
+    "position": "left"
+  },
+  "display": {
+    "separator": "  ",
+    "color": { "keys": "magenta", "title": "bright_magenta", "output": "white", "separator": "bright_black" },
+    "key": { "width": 11 }
+  },
+  "modules": [
+    "title",
+    "separator",
+    "os",
+    "kernel",
+    "uptime",
+    "packages",
+    "shell",
+    "wm",
+    "terminal",
+    { "type": "cpu", "format": "{name}" },
+    { "type": "gpu", "format": "{name} [{type}]" },
+    "memory",
+    { "type": "disk", "folders": "/" },
+    "colors"
+  ]
+}

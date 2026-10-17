@@ -46,6 +46,11 @@ and layout are preserved) and validates the result with `--check-config`. Restar
 To undo: `python3 contrib/rice/install.py --restore ~/.config/rusted-rice-backups/<stamp>/manifest.json`.
 Everything installed by the preset lives in `~/.config/rusted-rice` plus the native config dirs it lists.
 
+`fastfetch` is themed to match (RUSTED wordmark in lavender, graphite keys, compact modules) and starts in
+every interactive **foot** shell: the installer drops the config in `~/.config/fastfetch`, the snippet in
+`~/.config/rusted-rice/fastfetch.bash`, and adds one source line to `~/.bashrc` (`--no-bashrc` opts out).
+Other terminals and non-interactive shells stay quiet.
+
 `rusted-settings` (built from the workspace) edits the same config through the same CLI, with schema-driven
 pages for general options, keybinds, default apps, input, colors, wallpaper, appearance and audio. The
 Wallpaper page previews the current image, offers a file picker and thumbnails of everything in

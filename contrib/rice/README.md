@@ -37,6 +37,9 @@ Restore refuses to overwrite files that changed since installation; move those a
 - Waybar is started by `waybar.py supervise`, one bar per monitor; workspace clicks switch that monitor only.
 - `wallpaper.py` keeps swaybg in sync with the `[wallpaper]` config section, so the settings app's Wallpaper
   page (file picker or thumbnail gallery) applies a new image without restarting the session.
+- `fastfetch/config.jsonc` + `logo.txt` are themed to match and `fastfetch.bash` shows them once in every
+  interactive foot shell. The installer sources that snippet from `~/.bashrc` (marker-guarded, backed up,
+  `--no-bashrc` opts out); other terminals and non-interactive shells are unaffected.
 - Effects are live-reloadable: set `appearance.blur_enabled=false` (etc.) and reload. Disabling the whole
   `[appearance]` section restores the rectangular renderer.
 - The preset does not copy anything from the wallpaper source archive, only the wallpaper itself
