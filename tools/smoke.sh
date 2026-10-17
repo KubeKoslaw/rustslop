@@ -103,6 +103,8 @@ $CTL shot "$OUT/output2.png" 2 >/dev/null
 check "screenshot of output 2" $([ -s "$OUT/output2.png" ]; echo $?)
 $CTL output rm >/dev/null; sleep 1
 check "output removed" $([ "$(outputs_n)" = 1 ]; echo $?)
+$CTL output add 800 600 >/dev/null; $CTL output focus 2 >/dev/null; $CTL output rm >/dev/null; sleep 1
+check "removing the focused output returns focus to the first" $($CTL info | grep '^output ' | sed -n 1p | grep -q "focused=true"; echo $?)
 
 echo; echo "passed=$pass failed=$fail (outputs in $OUT)"
 [ "$fail" -eq 0 ]

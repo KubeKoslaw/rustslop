@@ -45,7 +45,7 @@ use smithay::{
         drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags},
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_server::DisplayHandle,
+        wayland_server::{backend::GlobalId, DisplayHandle},
     },
     utils::{DeviceFd, Logical, Physical, Point, Transform},
     wayland::compositor::with_states,
@@ -54,6 +54,7 @@ use smithay::{
 use crate::{control, cursor::CursorTheme, state::State};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 const COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Xrgb8888, Fourcc::Argb8888];
 
 type Compositor = DrmCompositor<
@@ -74,6 +75,8 @@ smithay::backend::renderer::element::render_elements! {
 /// One connected display: its output, CRTC and scan-out queue.
 struct Head {
     output: Output,
+    global: GlobalId,
+    connector: connector::Handle,
     crtc: crtc::Handle,
     compositor: Compositor,
     frame_pending: bool,
@@ -81,6 +84,8 @@ struct Head {
 
 struct Gpu {
     drm: DrmDevice,
+    gbm: GbmDevice<DrmDeviceFd>,
+    dh: DisplayHandle,
     renderer: GlesRenderer,
     cursor: CursorTheme,
     heads: Vec<Head>,
@@ -121,72 +126,13 @@ impl Tty {
         let renderer = unsafe { GlesRenderer::new(context)? };
 
         // Every connected connector with a mode, each on its own CRTC.
-        let resources = drm.resource_handles()?;
-        let mut used: Vec<crtc::Handle> = Vec::new();
         let mut heads: Vec<Head> = Vec::new();
-        let connectors: Vec<connector::Info> = resources
-            .connectors()
-            .iter()
-            .filter_map(|&h| drm.get_connector(h, true).ok())
-            .filter(|c| c.state() == connector::State::Connected)
-            .collect();
-        for conn in connectors {
-            let Some(mode) = conn
-                .modes()
-                .iter()
-                .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-                .or(conn.modes().first())
-                .copied()
-            else {
-                continue;
-            };
-            let current = conn.current_encoder().and_then(|e| drm.get_encoder(e).ok()).and_then(|e| e.crtc());
-            let crtc: Option<crtc::Handle> = current.filter(|c| !used.contains(c)).or_else(|| {
-                conn.encoders()
-                    .iter()
-                    .filter_map(|&e| drm.get_encoder(e).ok())
-                    .flat_map(|e| resources.filter_crtcs(e.possible_crtcs()))
-                    .find(|c| !used.contains(c))
-            });
-            let Some(crtc) = crtc else {
-                tracing::warn!(connector = ?conn.interface(), "no free CRTC, skipping");
-                continue;
-            };
-            used.push(crtc);
-
-            let name = format!("{}-{}", conn.interface().as_str(), conn.interface_id());
-            let (w_mm, h_mm) = conn.size().unwrap_or((0, 0));
-            let output = Output::new(
-                name.clone(),
-                PhysicalProperties {
-                    size: (w_mm as i32, h_mm as i32).into(),
-                    subpixel: Subpixel::Unknown,
-                    make: "rusted".into(),
-                    model: name.clone(),
-                },
-            );
-            let _global = output.create_global::<State>(dh);
-            let output_mode = OutputMode::from(mode);
-            // Positions are assigned by `State::layout_outputs` once the config (scale) is known.
-            output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
-            output.set_preferred(output_mode);
-            tracing::info!(%name, mode = ?output_mode, "output ready");
-
-            let surface = drm.create_surface(crtc, mode, &[conn.handle()])?;
-            let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
-            let exporter = GbmFramebufferExporter::new(gbm.clone(), None);
-            let compositor: Compositor = DrmCompositor::new(
-                &output,
-                surface,
-                None,
-                allocator,
-                exporter,
-                COLOR_FORMATS,
-                renderer.dmabuf_formats(),
-                drm.cursor_size(),
-                Some(gbm.clone()),
-            )?;
-            heads.push(Head { output, crtc, compositor, frame_pending: false });
+        for conn in connected_connectors(&drm) {
+            match make_head(&mut drm, &gbm, &renderer, dh, &conn, &heads) {
+                Ok(Some(head)) => heads.push(head),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(connector = ?conn.interface(), "cannot use connector: {e}"),
+            }
         }
         if heads.is_empty() {
             return Err("no connected display found".into());
@@ -197,7 +143,7 @@ impl Tty {
             session_notifier,
             seat_name,
             drm_notifier,
-            gpu: Gpu { drm, renderer, cursor: CursorTheme::load(), heads, active: true },
+            gpu: Gpu { drm, gbm, dh: dh.clone(), renderer, cursor: CursorTheme::load(), heads, active: true },
         })
     }
 
@@ -268,8 +214,14 @@ impl Tty {
         // Fallback tick: starts the first frame and retries when nothing was queued.
         handle.insert_source(Timer::from_duration(FRAME_INTERVAL), {
             let gpu = gpu.clone();
+            let mut last_scan = std::time::Instant::now();
             move |_, _, state| {
                 let mut gpu = gpu.borrow_mut();
+                // Hotplug: look for (un)plugged monitors a couple of times a second.
+                if gpu.active && last_scan.elapsed() >= RESCAN_INTERVAL {
+                    last_scan = std::time::Instant::now();
+                    rescan(&mut gpu, state);
+                }
                 for idx in 0..gpu.heads.len() {
                     render(&mut gpu, state, idx);
                 }
@@ -277,6 +229,119 @@ impl Tty {
             }
         })?;
         Ok(())
+    }
+}
+
+fn connected_connectors(drm: &DrmDevice) -> Vec<connector::Info> {
+    let Ok(resources) = drm.resource_handles() else { return Vec::new() };
+    resources
+        .connectors()
+        .iter()
+        // Not forcing a probe: the kernel updates connector state itself on hotplug events.
+        .filter_map(|&h| drm.get_connector(h, false).ok())
+        .filter(|c| c.state() == connector::State::Connected)
+        .collect()
+}
+
+/// Bring up a connector: pick a free CRTC, create its output and scan-out queue. `None` if the
+/// connector has no mode or no CRTC is free.
+fn make_head(
+    drm: &mut DrmDevice,
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &GlesRenderer,
+    dh: &DisplayHandle,
+    conn: &connector::Info,
+    existing: &[Head],
+) -> Result<Option<Head>, BoxError> {
+    let Some(mode) = conn
+        .modes()
+        .iter()
+        .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .or(conn.modes().first())
+        .copied()
+    else {
+        return Ok(None);
+    };
+    let resources = drm.resource_handles()?;
+    let used = |c: &crtc::Handle| existing.iter().any(|h| &h.crtc == c);
+    let current = conn.current_encoder().and_then(|e| drm.get_encoder(e).ok()).and_then(|e| e.crtc());
+    let crtc: Option<crtc::Handle> = current.filter(|c| !used(c)).or_else(|| {
+        conn.encoders()
+            .iter()
+            .filter_map(|&e| drm.get_encoder(e).ok())
+            .flat_map(|e| resources.filter_crtcs(e.possible_crtcs()))
+            .find(|c| !used(c))
+    });
+    let Some(crtc) = crtc else {
+        tracing::warn!(connector = ?conn.interface(), "no free CRTC, skipping");
+        return Ok(None);
+    };
+
+    let name = format!("{}-{}", conn.interface().as_str(), conn.interface_id());
+    let (w_mm, h_mm) = conn.size().unwrap_or((0, 0));
+    let output = Output::new(
+        name.clone(),
+        PhysicalProperties {
+            size: (w_mm as i32, h_mm as i32).into(),
+            subpixel: Subpixel::Unknown,
+            make: "rusted".into(),
+            model: name.clone(),
+        },
+    );
+    let global = output.create_global::<State>(dh);
+    let output_mode = OutputMode::from(mode);
+    // Positions are assigned by `State::layout_outputs` once the config (scale) is known.
+    output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
+    output.set_preferred(output_mode);
+    tracing::info!(%name, mode = ?output_mode, "output ready");
+
+    let surface = drm.create_surface(crtc, mode, &[conn.handle()])?;
+    let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+    let exporter = GbmFramebufferExporter::new(gbm.clone(), None);
+    let compositor: Compositor = DrmCompositor::new(
+        &output,
+        surface,
+        None,
+        allocator,
+        exporter,
+        COLOR_FORMATS,
+        renderer.dmabuf_formats(),
+        drm.cursor_size(),
+        Some(gbm.clone()),
+    )?;
+    Ok(Some(Head { output, global, connector: conn.handle(), crtc, compositor, frame_pending: false }))
+}
+
+/// React to monitors being plugged in or out. The last remaining head is never dropped.
+fn rescan(gpu: &mut Gpu, state: &mut State) {
+    let connected = connected_connectors(&gpu.drm);
+
+    let mut i = 0;
+    while i < gpu.heads.len() {
+        let still_there = connected.iter().any(|c| c.handle() == gpu.heads[i].connector);
+        if still_there || gpu.heads.len() == 1 {
+            i += 1;
+            continue;
+        }
+        let head = gpu.heads.remove(i);
+        tracing::info!(output = %head.output.name(), "monitor unplugged");
+        state.remove_output(&head.output);
+        gpu.dh.remove_global::<State>(head.global);
+    }
+
+    for conn in connected {
+        if gpu.heads.iter().any(|h| h.connector == conn.handle()) {
+            continue;
+        }
+        match make_head(&mut gpu.drm, &gpu.gbm, &gpu.renderer, &gpu.dh, &conn, &gpu.heads) {
+            Ok(Some(head)) => {
+                tracing::info!(output = %head.output.name(), "monitor plugged in");
+                state.add_output(head.output.clone());
+                gpu.heads.push(head);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(connector = ?conn.interface(), "cannot use new connector: {e}"),
+        }
     }
 }
 

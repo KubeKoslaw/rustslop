@@ -530,6 +530,11 @@ impl State {
         let mode = OutputMode { size: (w, h).into(), refresh: 60_000 };
         output.change_current_state(Some(mode), Some(Transform::Normal), None, None);
         output.set_preferred(mode);
+        self.add_output(output);
+    }
+
+    /// Start using a new output (a hotplugged monitor): it shows the first free workspace.
+    pub fn add_output(&mut self, output: Output) {
         let ws = (0..WORKSPACE_COUNT).find(|&i| self.mon_of_ws(i).is_none()).unwrap_or(0);
         self.outputs.push(Mon { output, ws });
         self.apply_scale();
@@ -537,18 +542,34 @@ impl State {
         self.relayout();
     }
 
-    pub fn remove_last_output(&mut self) {
+    /// Stop using an output (unplugged). Its workspace stays alive but hidden; the last output
+    /// is never removed.
+    pub fn remove_output(&mut self, output: &Output) {
+        let Some(idx) = self.output_index(output) else { return };
         if self.outputs.len() < 2 {
             return;
         }
-        let mon = self.outputs.pop().unwrap();
-        self.space.unmap_output(&mon.output);
-        if self.focused >= self.outputs.len() {
-            self.focused = 0;
+        // Layer surfaces (bars) of a vanished monitor have nowhere to go.
+        for layer in layer_map_for_output(output).layers() {
+            layer.layer_surface().send_close();
         }
+        let mon = self.outputs.remove(idx);
+        self.space.unmap_output(&mon.output);
+        self.focused = match self.focused {
+            f if f == idx => 0,
+            f if f > idx => f - 1,
+            f => f,
+        };
+        self.apply_scale();
         self.sync_space();
         self.relayout();
         self.focus_top();
+    }
+
+    pub fn remove_last_output(&mut self) {
+        if let Some(last) = self.outputs.last().map(|m| m.output.clone()) {
+            self.remove_output(&last);
+        }
     }
 
     // ---- mouse drags (floating windows) ----
