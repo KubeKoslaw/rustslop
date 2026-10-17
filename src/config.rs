@@ -72,6 +72,20 @@ impl Default for Colors {
 pub struct OutputSettings {
     /// `"1920x1080"` or `"1920x1080@75"`; empty means the monitor's preferred mode.
     pub mode: String,
+    /// Logical position `"X,Y"` (`"1920,0"` puts this monitor to the right of a 1920-wide one).
+    /// Empty means "to the right of the configured outputs, in connector order".
+    pub position: String,
+}
+
+/// Parse a `"X,Y"` logical position used by `[outputs.NAME]`.
+pub fn parse_output_position(s: &str) -> Result<(i32, i32), String> {
+    let (x, y) = s.split_once(',').ok_or_else(|| "expected \"X,Y\" in logical pixels".to_string())?;
+    let x: i32 = x.trim().parse().map_err(|_| "X is not a number".to_string())?;
+    let y: i32 = y.trim().parse().map_err(|_| "Y is not a number".to_string())?;
+    if !(-32768..=32767).contains(&x) || !(-32768..=32767).contains(&y) {
+        return Err("position is outside -32768..32767".into());
+    }
+    Ok((x, y))
 }
 
 /// Parse `WIDTHxHEIGHT` or `WIDTHxHEIGHT@REFRESH` (refresh may be fractional, e.g. `59.94`).
@@ -537,12 +551,17 @@ impl Config {
         appearance.validate(&mut problems);
         let mut outputs = raw.outputs;
         for (name, settings) in outputs.iter_mut() {
-            if settings.mode.trim().is_empty() {
-                continue;
+            if !settings.mode.trim().is_empty() {
+                if let Err(e) = parse_output_mode(&settings.mode) {
+                    problems.push(format!("outputs.{name}.mode = {:?}: {e}; using the preferred mode", settings.mode));
+                    settings.mode.clear();
+                }
             }
-            if let Err(e) = parse_output_mode(&settings.mode) {
-                problems.push(format!("outputs.{name}.mode = {:?}: {e}; using the preferred mode", settings.mode));
-                settings.mode.clear();
+            if !settings.position.trim().is_empty() {
+                if let Err(e) = parse_output_position(&settings.position) {
+                    problems.push(format!("outputs.{name}.position = {:?}: {e}; laying it out automatically", settings.position));
+                    settings.position.clear();
+                }
             }
         }
         (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, outputs, bindings }, problems)
@@ -598,8 +617,8 @@ fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
                     problems.push(format!("[outputs.{connector}] must be a table"));
                     continue;
                 };
-                for k in inner.keys().filter(|k| k.as_str() != "mode") {
-                    problems.push(format!("unknown key `{k}` in [outputs.{connector}]; only `mode` is supported"));
+                for k in inner.keys().filter(|k| !matches!(k.as_str(), "mode" | "position")) {
+                    problems.push(format!("unknown key `{k}` in [outputs.{connector}]; only `mode` and `position` are supported"));
                 }
             }
             continue;
@@ -762,7 +781,20 @@ mod tests {
         assert!(config.outputs["HDMI-A-1"].mode.is_empty(), "invalid mode is dropped");
         assert!(problems.iter().any(|p| p.contains("outputs.HDMI-A-1.mode")), "{problems:?}");
         let (_, problems) = Config::parse("[outputs.DP-1]\nmodel = \"x\"", false);
-        assert!(problems.iter().any(|p| p.contains("only `mode` is supported")), "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("only `mode` and `position`")), "{problems:?}");
+
+        assert_eq!(parse_output_position("1920,0"), Ok((1920, 0)));
+        assert_eq!(parse_output_position("-1920, 120"), Ok((-1920, 120)));
+        for bad in ["1920", "a,0", "0,b"] {
+            assert!(parse_output_position(bad).is_err(), "{bad} should be rejected");
+        }
+        let (config, problems) = Config::parse(
+            "[outputs.DP-1]\nposition = \"1920,0\"\n[outputs.DP-3]\nposition = \"left\"",
+            false,
+        );
+        assert_eq!(config.outputs["DP-1"].position, "1920,0");
+        assert!(config.outputs["DP-3"].position.is_empty());
+        assert!(problems.iter().any(|p| p.contains("outputs.DP-3.position")), "{problems:?}");
     }
 
     #[test]

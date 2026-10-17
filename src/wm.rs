@@ -149,16 +149,41 @@ impl State {
 
     /// Place outputs left to right (logical widths) and map them into the space.
     pub fn layout_outputs(&mut self) {
-        let mut x = 0;
-        for m in &self.outputs {
-            let size: smithay::utils::Size<i32, Logical> = m
-                .output
+        // `[outputs.NAME] position = "X,Y"` wins; monitors without one are chained to the right of
+        // the rightmost configured monitor (which is the old left-to-right behaviour when no
+        // positions are set at all).
+        let logical = |m: &Mon| -> smithay::utils::Size<i32, Logical> {
+            m.output
                 .current_mode()
                 .map(|mode| mode.size.to_f64().to_logical(m.output.current_scale().fractional_scale()).to_i32_round())
-                .unwrap_or_default();
-            m.output.change_current_state(None, None, None, Some((x, 0).into()));
-            self.space.map_output(&m.output, (x, 0));
-            x += size.w;
+                .unwrap_or_default()
+        };
+        let configured: Vec<Option<(i32, i32)>> = self
+            .outputs
+            .iter()
+            .map(|m| {
+                let settings = self.config.outputs.get(&m.output.name())?;
+                if settings.position.trim().is_empty() {
+                    return None;
+                }
+                crate::config::parse_output_position(&settings.position).ok()
+            })
+            .collect();
+        let mut next_x = configured
+            .iter()
+            .zip(&self.outputs)
+            .filter_map(|(pos, m)| pos.map(|(x, _)| x + logical(m).w))
+            .max()
+            .unwrap_or(0);
+        for (i, m) in self.outputs.iter().enumerate() {
+            let size = logical(m);
+            let (x, y) = configured[i].unwrap_or_else(|| {
+                let pos = (next_x, 0);
+                next_x += size.w;
+                pos
+            });
+            m.output.change_current_state(None, None, None, Some((x, y).into()));
+            self.space.map_output(&m.output, (x, y));
         }
     }
 

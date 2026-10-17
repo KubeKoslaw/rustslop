@@ -30,9 +30,12 @@ settings = "rusted-settings"      # the GUI settings app (mod+s)
 
 # Per-output overrides, keyed by connector name (see `rusted-wm ctl info` or the session log).
 # mode = "WIDTHxHEIGHT[@REFRESH]" forces a mode; without it the monitor's preferred mode is used.
-# Example: run a 75 Hz panel at 75 Hz instead of its preferred 60 Hz.
+# Example: run a 75 Hz panel at 75 Hz instead of its preferred 60 Hz, on the right of a
+# 1920-wide monitor. `position` is in logical pixels; monitors without one are placed to the
+# right of the configured ones, in connector order.
 # [outputs.DP-1]
 # mode = "1920x1080@75"
+# position = "1920,0"
 
 [input]
 layout = ""           # xkb layout, e.g. "pl" or "us,de" (empty = system default)
