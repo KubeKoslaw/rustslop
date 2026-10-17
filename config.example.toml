@@ -30,7 +30,7 @@ background = "#14141f"
 
 # Merged over the defaults. "mod" is the modifier above. Use "none" to remove a default bind.
 # Actions: spawn, spawn:CMD ARGS, close, focus-next, focus-left/right/up/down, toggle-floating,
-#          swap-left/right/up/down, grow, shrink, toggle-fullscreen,
+#          swap-left/right/up/down, move-to-output-left/right/up/down, grow, shrink, toggle-fullscreen,
 #          workspace:N, move-to-workspace:N (N = 1-9), reload, quit
 [keybinds]
 # "mod+d" = "spawn:fuzzel"
