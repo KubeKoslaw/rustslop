@@ -29,6 +29,7 @@ const USAGE: &str = "usage: rusted-wm config <command>
   bind KEYS ACTION             e.g. bind mod+shift+s 'spawn:grim -g \"$(slurp)\" - | wl-copy'
   unbind KEYS [--disable]      remove your bind (back to the default); --disable turns a default off
   autostart list|add CMD|remove N
+  dump                         everything above as one JSON document (used by rusted-settings)
 options: --no-reload   do not tell a running compositor to reload";
 
 pub fn run(args: &[String]) -> i32 {
@@ -43,6 +44,7 @@ pub fn run(args: &[String]) -> i32 {
         ["list"] => list(&path),
         ["get", key] => get(&path, key),
         ["binds"] => binds(&path),
+        ["dump"] => dump(&path),
         ["autostart", "list"] => autostart_list(&path),
         ["set", key, value] => modify(&path, no_reload, |t| set_value(t, key, value)),
         ["unset", key] => modify(&path, no_reload, |t| unset(t, key)),
@@ -347,6 +349,66 @@ fn binds(path: &Path) -> Result<(), String> {
     for (k, (action, tag)) in &all {
         outln!("{k:<26} {action:<40} [{tag}]");
     }
+    Ok(())
+}
+
+/// Current state as JSON: settings (value, default, whether the file sets it), binds, autostart.
+fn dump(path: &Path) -> Result<(), String> {
+    use crate::schema::json_str;
+    fn conv(v: &Value) -> String {
+        match v {
+            Value::String(s) => json_str(s.value()),
+            Value::Integer(i) => i.value().to_string(),
+            Value::Float(f) => f.value().to_string(),
+            Value::Boolean(b) => b.value().to_string(),
+            other => json_str(other.to_string().trim()),
+        }
+    }
+    let text = read(path)?;
+    let doc = parse_doc(&text)?;
+    let mut settings = Vec::new();
+    for s in SETTINGS.iter().filter(|s| !matches!(s.kind, Kind::List | Kind::Map)) {
+        let item = doc.get(s.section).and_then(|t| t.get(s.key));
+        let (value, set) = match item.and_then(Item::as_value) {
+            Some(v) => (conv(v), true),
+            None => (crate::schema::default_json(s.default), false),
+        };
+        settings.push(format!(
+            "{{\"key\":{},\"value\":{value},\"default\":{},\"set\":{set}}}",
+            json_str(&format!("{}.{}", s.section, s.key)),
+            crate::schema::default_json(s.default)
+        ));
+    }
+    let user: std::collections::BTreeMap<String, String> = doc
+        .get("keybinds")
+        .and_then(Item::as_table)
+        .map(|t| t.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.to_string(), s.to_string()))).collect())
+        .unwrap_or_default();
+    let mut all: std::collections::BTreeMap<String, (String, &str)> =
+        DEFAULT_KEYBINDS.iter().map(|(k, v)| (k.to_string(), (v.to_string(), "default"))).collect();
+    for (k, v) in user {
+        let tag = if v == "none" { "disabled" } else { "custom" };
+        all.insert(k, (v, tag));
+    }
+    let binds: Vec<String> = all
+        .iter()
+        .map(|(k, (a, t))| format!("{{\"keys\":{},\"action\":{},\"tag\":{}}}", json_str(k), json_str(a), json_str(t)))
+        .collect();
+    let autostart: Vec<String> = doc
+        .get("autostart")
+        .and_then(Item::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(json_str)).collect())
+        .unwrap_or_default();
+    let (_, problems) = Config::parse(&text, true);
+    let problems: Vec<String> = problems.iter().map(|p| json_str(p)).collect();
+    outln!(
+        "{{\"path\":{},\"settings\":[{}],\"binds\":[{}],\"autostart\":[{}],\"problems\":[{}]}}",
+        json_str(&path.display().to_string()),
+        settings.join(","),
+        binds.join(","),
+        autostart.join(","),
+        problems.join(",")
+    );
     Ok(())
 }
 

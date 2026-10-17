@@ -124,6 +124,16 @@ check "--check-config accepts the shipped configs" $(./target/debug/rusted-wm --
 printf '[general]\ngapp = 3\n' > "$OUT/bad.toml"
 check "--check-config fails on a config with problems" $(! ./target/debug/rusted-wm --check-config "$OUT/bad.toml" >/dev/null; echo $?)
 
+# ---- GUI settings app (only when it was built: cargo build --workspace) ----
+if [ -x target/debug/rusted-settings ]; then
+  WAYLAND_DISPLAY=$SOCK GDK_BACKEND=wayland GSK_RENDERER=cairo RUSTED_WM="$PWD/target/debug/rusted-wm" RUSTED_CONFIG="$OUT/config.toml" \
+    ./target/debug/rusted-settings >"$OUT/settings-gui.log" 2>&1 &
+  GUIPID=$!; sleep 4
+  check "settings GUI opens a window" $($CTL info | grep -q 'title="rusted-wm settings"'; echo $?)
+  $CTL shot "$OUT/settings-gui.png" >/dev/null
+  kill $GUIPID 2>/dev/null; sleep 1
+fi
+
 # ---- audio actions (fake wpctl / notify-send) ----
 $CTL volume up >/dev/null; sleep 1
 check "volume up calls wpctl set-volume with the step" $(grep -q "set-volume -l 1.00 @DEFAULT_AUDIO_SINK@ 5%+" "$OUT/wpctl.log"; echo $?)

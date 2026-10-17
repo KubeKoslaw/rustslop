@@ -25,13 +25,14 @@ modifier = "auto"   # super on a real session, alt when nested
 # scale = 1.0
 
 # Default programs: change them here and every bind that uses @name follows
-# (mod+Enter = terminal, mod+d = launcher, mod+b = browser, mod+e = file manager, mod+shift+x = lock).
+# (mod+Enter = terminal, mod+d = launcher, mod+b = browser, mod+e = file manager, mod+shift+x = lock, mod+s = settings).
 [apps]
 terminal = "foot"
 launcher = "fuzzel"
 browser = "firefox"
 file_manager = "dolphin"
 lock = "swaylock -f -c 000000"
+settings = "rusted-settings"
 
 [audio]
 step = 5

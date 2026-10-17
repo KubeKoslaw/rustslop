@@ -91,6 +91,7 @@ pub struct Apps {
     pub browser: String,
     pub file_manager: String,
     pub lock: String,
+    pub settings: String,
 }
 
 impl Default for Apps {
@@ -101,6 +102,7 @@ impl Default for Apps {
             browser: "xdg-open https://".into(),
             file_manager: "xdg-open .".into(),
             lock: "swaylock -f -c 000000".into(),
+            settings: "rusted-settings".into(),
         }
     }
 }
@@ -115,6 +117,7 @@ impl Apps {
             "browser" => self.browser.clone(),
             "file_manager" => self.file_manager.clone(),
             "lock" => self.lock.clone(),
+            "settings" => self.settings.clone(),
             _ => return None,
         })
     }
@@ -198,6 +201,7 @@ pub(crate) const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+b", "spawn:@browser"),
     ("mod+e", "spawn:@file_manager"),
     ("mod+shift+x", "spawn:@lock"),
+    ("mod+s", "spawn:@settings"),
     ("mod+h", "focus-left"),
     ("mod+l", "focus-right"),
     ("mod+k", "focus-up"),
@@ -519,7 +523,7 @@ pub(crate) fn parse_action(s: &str, apps: &Apps, terminal: &str) -> Result<Actio
             Some(a) if a.starts_with('@') => {
                 let (name, rest) = a[1..].split_once(' ').unwrap_or((&a[1..], ""));
                 let base = apps.resolve(name, terminal).ok_or_else(|| {
-                    format!("unknown app @{name} (use @terminal, @launcher, @browser, @file_manager or @lock)")
+                    format!("unknown app @{name} (use @terminal, @launcher, @browser, @file_manager, @lock or @settings)")
                 })?;
                 if rest.is_empty() { base } else { format!("{base} {rest}") }
             }

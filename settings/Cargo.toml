@@ -1,0 +1,9 @@
+[package]
+name = "rusted-settings"
+version = "0.1.0"
+edition = "2024"
+description = "GTK4 settings app for rusted-wm (a thin client of `rusted-wm config`)"
+
+[dependencies]
+gtk4 = { version = "0.10", features = ["v4_10"] }
+serde_json = "1"

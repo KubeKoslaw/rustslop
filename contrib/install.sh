@@ -23,6 +23,14 @@ install)
     fi
     install -Dm755 "$BIN" "$DESTDIR$PREFIX/bin/rusted-wm"
     install -Dm755 contrib/rusted-session "$DESTDIR$PREFIX/bin/rusted-session"
+    # The GTK settings app is optional: installed when it was built (cargo build --release --workspace).
+    SETTINGS_BIN=${SETTINGS_BIN:-target/release/rusted-settings}
+    if [ -x "$SETTINGS_BIN" ]; then
+        install -Dm755 "$SETTINGS_BIN" "$DESTDIR$PREFIX/bin/rusted-settings"
+        install -Dm644 contrib/rusted-settings.desktop "$DESTDIR$PREFIX/share/applications/rusted-settings.desktop"
+    else
+        echo "note: $SETTINGS_BIN not found, skipping the settings app (cargo build --release --workspace)"
+    fi
     install -d "$DESTDIR$SESSIONS"
     sed "s|@PREFIX@|$PREFIX|g" contrib/rusted.desktop.in > "$DESTDIR$SESSIONS/rusted.desktop"
     chmod 644 "$DESTDIR$SESSIONS/rusted.desktop"
@@ -33,6 +41,7 @@ install)
     ;;
 uninstall)
     rm -f "$DESTDIR$PREFIX/bin/rusted-wm" "$DESTDIR$PREFIX/bin/rusted-session" \
+        "$DESTDIR$PREFIX/bin/rusted-settings" "$DESTDIR$PREFIX/share/applications/rusted-settings.desktop" \
         "$DESTDIR$SESSIONS/rusted.desktop" "$DESTDIR$PREFIX/share/doc/rusted-wm/config.example.toml"
     rmdir "$DESTDIR$PREFIX/share/doc/rusted-wm" 2>/dev/null || true
     echo "removed rusted-wm session files"

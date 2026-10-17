@@ -50,6 +50,7 @@ pub const SETTINGS: &[Setting] = &[
     s("apps", "browser", Kind::Text, "\"xdg-open https://\"", "Web browser. Referenced as @browser.", false),
     s("apps", "file_manager", Kind::Text, "\"xdg-open .\"", "File manager. Referenced as @file_manager.", false),
     s("apps", "lock", Kind::Text, "\"swaylock -f -c 000000\"", "Screen locker. Referenced as @lock.", false),
+    s("apps", "settings", Kind::Text, "\"rusted-settings\"", "This settings app. Referenced as @settings.", false),
     s("input", "layout", Kind::Text, "\"\"", "xkb keyboard layout, e.g. \"pl\" (needed on a real TTY).", true),
     s("input", "variant", Kind::Text, "\"\"", "xkb layout variant.", true),
     s("input", "options", Kind::Text, "\"\"", "xkb options, e.g. \"caps:escape\".", true),
@@ -110,7 +111,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("quit", ""),
 ];
 
-fn json_str(text: &str) -> String {
+pub fn json_str(text: &str) -> String {
     let mut out = String::from("\"");
     for c in text.chars() {
         match c {
@@ -126,7 +127,7 @@ fn json_str(text: &str) -> String {
 }
 
 /// A TOML default literal as JSON.
-fn default_json(literal: &str) -> String {
+pub fn default_json(literal: &str) -> String {
     let value: toml::Value = format!("v = {literal}").parse::<toml::Table>().ok().and_then(|mut t| t.remove("v")).unwrap_or(toml::Value::String(String::new()));
     fn conv(v: &toml::Value) -> String {
         match v {

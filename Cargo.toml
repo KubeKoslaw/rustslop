@@ -3,6 +3,9 @@ name = "rusted-wm"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["settings"]
+
 [dependencies]
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }

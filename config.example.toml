@@ -17,13 +17,14 @@ modifier = "auto"     # "auto" = super on a real session, alt when nested in ano
 
 # Default programs. Reference them from keybinds as "spawn:@launcher" (optionally with arguments,
 # e.g. "spawn:@terminal -e htop"). Defaults: mod+d launcher, mod+b browser, mod+e file manager,
-# mod+shift+x lock.
+# mod+shift+x lock, mod+s settings.
 [apps]
 terminal = ""                      # empty = use general.terminal
 launcher = "fuzzel"
 browser = "xdg-open https://"
 file_manager = "xdg-open ."
 lock = "swaylock -f -c 000000"
+settings = "rusted-settings"      # the GUI settings app (mod+s)
 
 [input]
 layout = ""           # xkb layout, e.g. "pl" or "us,de" (empty = system default)
