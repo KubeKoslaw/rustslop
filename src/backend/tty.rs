@@ -35,7 +35,6 @@ use smithay::{
         },
         udev::{all_gpus, primary_gpu},
     },
-    desktop::space::{space_render_elements, SpaceRenderElements},
     input::pointer::{CursorImageStatus, CursorImageSurfaceData},
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
     reexports::{
@@ -69,9 +68,8 @@ type Compositor = DrmCompositor<
 
 smithay::backend::renderer::element::render_elements! {
     pub TtyElement<=GlesRenderer>;
-    Space = SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
-    Overlay = super::OverlayElement,
+    Scene = super::SceneElement,
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
 }
 
@@ -377,7 +375,7 @@ fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
     }
     let output = gpu.heads[idx].output.clone();
     let geo = state.space.output_geometry(&output).unwrap_or_default();
-    let overlay = super::overlay_elements(state, &mut gpu.renderer, &output);
+    let scene = super::scene_elements(state, &mut gpu.renderer, &output);
     let background = super::clear_color(state);
     let scale = state.config.general.scale;
     let pointer: Point<f64, Logical> = state.seat.get_pointer().unwrap().current_location();
@@ -416,14 +414,7 @@ fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
             }
         }
     }
-    elements.extend(overlay.into_iter().map(TtyElement::Overlay));
-    // While locked the windows are not drawn at all.
-    if !state.locked {
-        match space_render_elements(&mut gpu.renderer, [&state.space], &output, 1.0) {
-            Ok(e) => elements.extend(e.into_iter().map(TtyElement::Space)),
-            Err(e) => tracing::warn!("space render: {e}"),
-        }
-    }
+    elements.extend(scene.into_iter().map(TtyElement::Scene));
 
     let head = &mut gpu.heads[idx];
     match head.compositor.render_frame(&mut gpu.renderer, &elements, background, FrameFlags::DEFAULT) {

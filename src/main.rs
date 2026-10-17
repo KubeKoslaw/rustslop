@@ -43,7 +43,7 @@ use smithay::{
     },
 };
 
-use backend::{tty::Tty, winit::Winit};
+use backend::{headless::Headless, tty::Tty, winit::Winit};
 use config::Config;
 use control::{Control, Reply};
 use state::{ClientState, State};
@@ -61,21 +61,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Nested window when started inside another desktop, real display otherwise (override: --winit / --tty).
     let arg = std::env::args().nth(1);
+    let headless = arg.as_deref() == Some("--headless");
     let use_tty = match arg.as_deref() {
         Some("--tty") => true,
-        Some("--winit") => false,
-        Some(other) => return Err(format!("unknown argument {other:?} (use --winit or --tty)").into()),
+        Some("--winit") | Some("--headless") => false,
+        Some(other) => return Err(format!("unknown argument {other:?} (use --winit, --tty or --headless)").into()),
         None => std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none(),
     };
-    tracing::info!(backend = if use_tty { "tty" } else { "winit" }, "starting");
+    tracing::info!(backend = if use_tty { "tty" } else if headless { "headless" } else { "winit" }, "starting");
     let (config, problems) = Config::load(use_tty);
     for p in &problems {
         tracing::warn!("config: {p}");
     }
-    let (winit, tty) = if use_tty { (None, Some(Tty::new(&dh)?)) } else { (Some(Winit::new(&dh)?), None) };
-    let outputs: Vec<Mon> = match (&winit, &tty) {
-        (Some(w), _) => vec![Mon { output: w.output.clone(), ws: 0 }],
-        (_, Some(t)) => t.outputs().into_iter().enumerate().map(|(i, output)| Mon { output, ws: i }).collect(),
+    let (winit, tty, headless) = match (use_tty, headless) {
+        (true, _) => (None, Some(Tty::new(&dh)?), None),
+        (false, true) => (None, None, Some(Headless::new(&dh)?)),
+        (false, false) => (Some(Winit::new(&dh)?), None, None),
+    };
+    let outputs: Vec<Mon> = match (&winit, &tty, &headless) {
+        (Some(w), _, _) => vec![Mon { output: w.output.clone(), ws: 0 }],
+        (_, Some(t), _) => t.outputs().into_iter().enumerate().map(|(i, output)| Mon { output, ws: i }).collect(),
+        (_, _, Some(h)) => vec![Mon { output: h.output.clone(), ws: 0 }],
         _ => unreachable!(),
     };
     let session = tty.as_ref().map(|t| t.session.clone());
@@ -205,6 +211,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(winit) = winit {
         winit.register(&handle)?;
+    }
+    if let Some(headless) = headless {
+        headless.register(&handle)?;
     }
     if let Some(tty) = tty {
         tty.register(&handle)?;

@@ -522,8 +522,12 @@ impl State {
     /// Send the focused window to the workspace shown on the neighbouring monitor.
     pub fn move_to_output(&mut self, dx: i32, dy: i32) {
         let Some(mon) = self.output_in_dir(dx, dy) else { return };
+        let Some(window) = self.focused_window() else { return };
         let ws = self.outputs[mon].ws;
         self.move_to_workspace(ws);
+        // Focus follows the window to its new monitor.
+        self.focus_output(mon);
+        self.focus_window(&window);
     }
 
     // ---- virtual outputs (control socket / tests) ----
@@ -615,17 +619,45 @@ impl State {
         if let Some(entry) = self.entry_mut(&window) {
             entry.float_rect = new;
         }
+        // Dragging a window onto another monitor hands it over to that monitor's workspace.
+        if let (Some(from_mon), Some(from_ws)) = (self.mon_of_window(&window), self.ws_of_window(&window)) {
+            let global = Rect::new(new.loc + self.output_loc(from_mon), new.size);
+            let center = Point::<f64, Logical>::from((
+                (global.loc.x + global.size.w / 2) as f64,
+                (global.loc.y + global.size.h / 2) as f64,
+            ));
+            if let Some(to_mon) = self.mon_at(center).filter(|&m| m != from_mon) {
+                let to_ws = self.outputs[to_mon].ws;
+                if let Some(pos) = self.workspaces[from_ws].entries.iter().position(|e| e.window == window) {
+                    let mut entry = self.workspaces[from_ws].entries.remove(pos);
+                    // Keep the window inside its new monitor (it may be bigger than that screen).
+                    let out = self.space.output_geometry(&self.outputs[to_mon].output).unwrap_or_default();
+                    let size = (global.size.w.min(out.size.w), global.size.h.min(out.size.h));
+                    let loc = global.loc - self.output_loc(to_mon);
+                    let loc = (loc.x.clamp(0, out.size.w - size.0), loc.y.clamp(0, out.size.h - size.1));
+                    entry.float_rect = Rect::new(loc.into(), size.into());
+                    let rebased = entry.float_rect;
+                    self.workspaces[to_ws].entries.push(entry);
+                    // Continue the drag relative to the new monitor.
+                    if let Some(drag) = &mut self.drag {
+                        drag.start_rect = rebased;
+                        drag.start_pointer = pointer;
+                    }
+                    self.focused = to_mon;
+                }
+            }
+        }
         self.relayout();
     }
 
     // ---- borders ----
 
-    /// Border strips drawn just outside every window of `output`'s workspace, in output-local
-    /// physical coordinates.
-    pub fn border_elements(&mut self, output: &Output) -> Vec<SolidColorRenderElement> {
+    /// Border strips of every window on `output`'s workspace, in output-local physical
+    /// coordinates, grouped per window so the renderer can stack each border with its window.
+    pub fn border_strips(&mut self, output: &Output) -> Vec<(Window, Vec<SolidColorRenderElement>)> {
         let Some(mon) = self.output_index(output) else { return Vec::new() };
         let ws = self.outputs[mon].ws;
-        // Borders are drawn above all windows, so hide them while something is fullscreen.
+        // Nothing but the fullscreen window is shown, so no borders then.
         if self.workspaces[ws].entries.iter().any(|e| e.fullscreen) {
             return Vec::new();
         }
@@ -648,11 +680,13 @@ impl State {
                 (g.loc.x + g.size.w, g.loc.y, b, g.size.h),
             ];
             let entry = &mut self.workspaces[ws].entries[i];
+            let mut elements = Vec::new();
             for (buf, (x, y, w, h)) in entry.borders.iter_mut().zip(strips) {
                 buf.update((w, h), color);
                 let at: Point<i32, Physical> = Point::<f64, Physical>::from((x as f64 * scale, y as f64 * scale)).to_i32_round();
-                out.push(SolidColorRenderElement::from_buffer(buf, at, scale, 1.0, Kind::Unspecified));
+                elements.push(SolidColorRenderElement::from_buffer(buf, at, scale, 1.0, Kind::Unspecified));
             }
+            out.push((window, elements));
         }
         out
     }

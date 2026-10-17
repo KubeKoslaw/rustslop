@@ -10,20 +10,35 @@ pass=0; fail=0
 check() { # name, condition-exit-status
   if [ "$2" -eq 0 ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi
 }
-# Only kill terminals that connected to OUR compositor (WAYLAND_DISPLAY=rusted-*), never the user's own.
+# SAFETY: only ever touch the compositor started by this script (its PID and its own socket), never
+# another rusted-wm that may be running on a real VT, and only terminals connected to that socket.
+WMPID=""; SOCK=""
 kill_test_terminals() {
+  [ -n "$SOCK" ] || return 0
   for p in $(pgrep -x konsole); do
-    tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -q '^WAYLAND_DISPLAY=rusted-' && kill $p
+    tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -qx "WAYLAND_DISPLAY=$SOCK" && kill $p
   done
 }
-cleanup() { $CTL quit >/dev/null 2>&1; sleep 1; pkill -x rusted-wm 2>/dev/null; kill_test_terminals; pkill -x layer_client 2>/dev/null; }
+cleanup() {
+  [ -n "$SOCK" ] && $CTL quit >/dev/null 2>&1
+  sleep 1
+  [ -n "$WMPID" ] && kill "$WMPID" 2>/dev/null
+  kill_test_terminals
+  [ -n "${LAYERPID:-}" ] && kill "$LAYERPID" 2>/dev/null
+}
 trap cleanup EXIT
 
 cargo build -q --all-targets 2>&1 | tail -3
-pkill -x rusted-wm 2>/dev/null; sleep 1
-RUSTED_CONFIG="$OUT/config.toml" RUST_LOG=info ./target/debug/rusted-wm >"$OUT/wm.log" 2>&1 &
-sleep 3
-SOCK=$(ls "$XDG_RUNTIME_DIR" | grep -E '^rusted-[0-9]+$' | tail -1)
+RUSTED_CONFIG="$OUT/config.toml" RUST_LOG=info ./target/debug/rusted-wm ${RUSTED_BACKEND---headless} >"$OUT/wm.log" 2>&1 &
+WMPID=$!
+for _ in $(seq 1 50); do
+  SOCK=$(grep -o 'WAYLAND_DISPLAY=rusted-[0-9]*' "$OUT/wm.log" | head -1 | cut -d= -f2)
+  [ -n "$SOCK" ] && break
+  sleep 0.2
+done
+[ -n "$SOCK" ] || { echo "compositor did not start, see $OUT/wm.log"; exit 1; }
+CTL="tools/ctl.py -s $SOCK"
+sleep 2
 n_windows() { $CTL info | grep -c "app_id="; }
 geo() { $CTL info | grep "app_id=" | sed 's/.*geo=//'; }
 
@@ -66,7 +81,7 @@ echo hello-clip | WAYLAND_DISPLAY=$SOCK timeout 3 wl-copy 2>/dev/null; sleep 1
 check "clipboard round trip" $([ "$(WAYLAND_DISPLAY=$SOCK timeout 3 wl-paste 2>/dev/null)" = hello-clip ]; echo $?)
 
 WAYLAND_DISPLAY=$SOCK ./target/debug/examples/layer_client top 40 >"$OUT/layer.log" 2>&1 &
-LPID=$!; sleep 2
+LPID=$!; LAYERPID=$LPID; sleep 2
 check "layer bar mapped" $(grep -q "bar mapped" "$OUT/layer.log"; echo $?)
 check "bar reserves 40px" $($CTL info | grep -q "geo=12,52"; echo $?)
 $CTL shot "$OUT/bar.png" >/dev/null
@@ -130,6 +145,19 @@ $CTL output rm >/dev/null; sleep 1
 check "output removed" $([ "$(outputs_n)" = 1 ]; echo $?)
 $CTL output add 800 600 >/dev/null; $CTL output focus 2 >/dev/null; $CTL output rm >/dev/null; sleep 1
 check "removing the focused output returns focus to the first" $($CTL info | grep '^output ' | sed -n 1p | grep -q "focused=true"; echo $?)
+
+# a window dragged onto another monitor joins that monitor's workspace; mvout keeps focus on it
+focused_x() { $CTL info | grep 'app_id=' | grep 'focused=true' | sed 's/.*geo=\([0-9-]*\),.*/\1/'; }
+$CTL output add 800 600 >/dev/null; sleep 1; $CTL output focus 1 >/dev/null; $CTL spawn >/dev/null; sleep 4; $CTL float >/dev/null
+set -- $($CTL info | grep 'app_id=' | grep 'focused=true' | sed 's/.*geo=\([0-9-]*\),\([0-9-]*\) \([0-9]*\)x\([0-9]*\)/\1 \2 \3 \4/') 0 0 0 0
+$CTL drag move $(($1 + $3 / 2)) $(($2 + $4 / 2)) $((W0 + 300)) 300 >/dev/null
+check "dragging a floating window onto the second output keeps it there" $([ "$(focused_x)" -ge "$W0" ]; echo $?)
+$CTL float >/dev/null
+check "toggling floating works on the second output (window stays on it)" $([ "$(focused_x)" -ge "$W0" ]; echo $?)
+$CTL output focus 1 >/dev/null; $CTL spawn >/dev/null; sleep 4; $CTL mvout l >/dev/null; sleep 1
+check "mvout leaves the moved window focused on the second output" $([ "$(focused_x)" -ge "$W0" ]; echo $?)
+$CTL shot "$OUT/output2b.png" 2 >/dev/null
+$CTL output rm >/dev/null; sleep 1
 
 echo; echo "passed=$pass failed=$fail (outputs in $OUT)"
 [ "$fail" -eq 0 ]

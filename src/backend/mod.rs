@@ -1,6 +1,7 @@
-//! Output backends. `winit` runs nested inside another compositor (development); `tty` drives
+//! Output backends. `headless` renders nowhere (tests); `winit` runs nested inside another compositor (development); `tty` drives
 //! real displays through DRM/KMS with libinput and a libseat session.
 
+pub mod headless;
 pub mod tty;
 pub mod winit;
 
@@ -15,6 +16,7 @@ use smithay::{
             damage::OutputDamageTracker,
             element::{
                 solid::SolidColorRenderElement,
+                AsRenderElements,
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 Kind, RenderElementStates,
             },
@@ -23,38 +25,87 @@ use smithay::{
         },
     },
     desktop::{
-        layer_map_for_output,
-        space::render_output,
+        layer_map_for_output, Window,
         utils::{surface_presentation_feedback_flags_from_states, OutputPresentationFeedback},
     },
     output::Output,
-    wayland::presentation::Refresh,
-    utils::{Rectangle, Transform},
+    wayland::{presentation::Refresh, shell::wlr_layer::Layer},
+    utils::{Rectangle, Scale, Transform},
 };
 
 smithay::backend::renderer::element::render_elements! {
-    /// Everything drawn on top of (or instead of) the space: borders, or the lock screen.
-    pub OverlayElement<=GlesRenderer>;
+    /// One drawable piece of the scene.
+    pub SceneElement<=GlesRenderer>;
     Solid = SolidColorRenderElement,
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
 }
 
-/// Borders normally; while the session is locked, only the lock surface of `output`.
-pub fn overlay_elements(state: &mut State, renderer: &mut GlesRenderer, output: &Output) -> Vec<OverlayElement> {
-    if !state.locked {
-        return state.border_elements(output).into_iter().map(OverlayElement::Solid).collect();
-    }
+/// The whole scene of `output`, top to bottom: overlay/top layers, then every window followed by
+/// its own border (so a border never paints over a window above it), then bottom/background
+/// layers. While the session is locked: only the lock surface of `output`.
+pub fn scene_elements(state: &mut State, renderer: &mut GlesRenderer, output: &Output) -> Vec<SceneElement> {
     let scale = state.config.general.scale;
-    let mut out = Vec::new();
-    for (o, surface) in &state.lock_surfaces {
-        if o == output {
-            out.extend(
-                render_elements_from_surface_tree(renderer, surface.wl_surface(), (0, 0), scale, 1.0, Kind::Unspecified)
-                    .into_iter()
-                    .map(OverlayElement::Surface),
-            );
+    let mut out: Vec<SceneElement> = Vec::new();
+
+    if state.locked {
+        for (o, surface) in &state.lock_surfaces {
+            if o == output {
+                out.extend(
+                    render_elements_from_surface_tree(renderer, surface.wl_surface(), (0, 0), scale, 1.0, Kind::Unspecified)
+                        .into_iter()
+                        .map(SceneElement::Surface),
+                );
+            }
+        }
+        return out;
+    }
+
+    let layer_elements = |renderer: &mut GlesRenderer, upper: bool| -> Vec<SceneElement> {
+        let map = layer_map_for_output(output);
+        map.layers()
+            .rev()
+            .filter(|l| matches!(l.layer(), Layer::Background | Layer::Bottom) != upper)
+            .filter_map(|l| map.layer_geometry(l).map(|geo| (geo.loc, l)))
+            .flat_map(|(loc, l)| {
+                AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                    l,
+                    renderer,
+                    loc.to_physical_precise_round(scale),
+                    Scale::from(scale),
+                    1.0,
+                )
+                .into_iter()
+                .map(SceneElement::Surface)
+                .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+
+    out.extend(layer_elements(renderer, true));
+
+    let mut borders = state.border_strips(output);
+    let origin = state.space.output_geometry(output).map(|g| g.loc).unwrap_or_default();
+    let windows: Vec<Window> = state.space.elements_for_output(output).rev().cloned().collect();
+    for window in windows {
+        let Some(location) = state.space.element_location(&window) else { continue };
+        let render_location = location - window.geometry().loc - origin;
+        out.extend(
+            AsRenderElements::<GlesRenderer>::render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                &window,
+                renderer,
+                render_location.to_physical_precise_round(scale),
+                Scale::from(scale),
+                1.0,
+            )
+            .into_iter()
+            .map(SceneElement::Surface),
+        );
+        if let Some(pos) = borders.iter().position(|(w, _)| *w == window) {
+            out.extend(borders.swap_remove(pos).1.into_iter().map(SceneElement::Solid));
         }
     }
+
+    out.extend(layer_elements(renderer, false));
     out
 }
 
@@ -97,8 +148,7 @@ pub fn render_to_rgba(
     if state.locked {
         return Err("session is locked".into());
     }
-    let borders = overlay_elements(state, renderer, output);
-    let space = &state.space;
+    let elements = scene_elements(state, renderer, output);
     let background = state.config.background;
     let mode = output.current_mode().ok_or("output has no mode")?;
     let (w, h) = (mode.size.w, mode.size.h);
@@ -106,7 +156,7 @@ pub fn render_to_rgba(
     let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, (w, h).into())?;
     let mut framebuffer = renderer.bind(&mut texture)?;
     let mut tracker = OutputDamageTracker::from_output(output);
-    render_output(output, renderer, &mut framebuffer, 1.0, 0, [space], &borders, &mut tracker, background)?;
+    tracker.render_output(renderer, &mut framebuffer, 0, &elements, background)?;
 
     let mapping = renderer.copy_framebuffer(&framebuffer, Rectangle::from_size((w, h).into()), Fourcc::Abgr8888)?;
     let bytes = renderer.map_texture(&mapping)?;

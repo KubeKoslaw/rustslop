@@ -7,7 +7,7 @@ use smithay::{
         renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    desktop::{layer_map_for_output, space::render_output},
+    desktop::layer_map_for_output,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::{
         timer::{TimeoutAction, Timer},
@@ -90,10 +90,8 @@ fn frame(
     let background = super::clear_color(state);
     let (damage, mut feedback) = {
         let (renderer, mut framebuffer) = backend.bind()?;
-        let overlay = super::overlay_elements(state, renderer, output);
-        // While locked the windows are not drawn at all.
-        let spaces = (!state.locked).then_some(&state.space);
-        let result = render_output(output, renderer, &mut framebuffer, 1.0, age, spaces, &overlay, damage_tracker, background)?;
+        let elements = super::scene_elements(state, renderer, output);
+        let result = damage_tracker.render_output(renderer, &mut framebuffer, age, &elements, background)?;
         let feedback = super::collect_feedback(state, output, &result.states);
         (result.damage.cloned(), feedback)
     };
