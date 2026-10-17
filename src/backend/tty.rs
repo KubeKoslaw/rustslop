@@ -52,7 +52,9 @@ use smithay::{
     wayland::compositor::with_states,
 };
 
-use crate::{control, cursor::CursorTheme, state::State};
+use std::collections::BTreeMap;
+
+use crate::{config::{parse_output_mode, OutputSettings}, control, cursor::CursorTheme, state::State};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
@@ -104,7 +106,7 @@ pub struct Tty {
 type BoxError = Box<dyn std::error::Error>;
 
 impl Tty {
-    pub fn new(dh: &DisplayHandle) -> Result<Self, BoxError> {
+    pub fn new(dh: &DisplayHandle, outputs: &BTreeMap<String, OutputSettings>) -> Result<Self, BoxError> {
         let (mut session, session_notifier) =
             LibSeatSession::new().map_err(|e| format!("cannot open a libseat session (is seatd/elogind running, and are you on a real VT?): {e}"))?;
         let seat_name = session.seat();
@@ -129,7 +131,7 @@ impl Tty {
         // Every connected connector with a mode, each on its own CRTC.
         let mut heads: Vec<Head> = Vec::new();
         for conn in connected_connectors(&drm) {
-            match make_head(&mut drm, &gbm, &renderer, dh, &conn, &heads) {
+            match make_head(&mut drm, &gbm, &renderer, dh, &conn, &heads, outputs) {
                 Ok(Some(head)) => heads.push(head),
                 Ok(None) => {}
                 Err(e) => tracing::warn!(connector = ?conn.interface(), "cannot use connector: {e}"),
@@ -263,14 +265,43 @@ fn make_head(
     dh: &DisplayHandle,
     conn: &connector::Info,
     existing: &[Head],
+    outputs: &BTreeMap<String, OutputSettings>,
 ) -> Result<Option<Head>, BoxError> {
-    let Some(mode) = conn
+    let name = format!("{}-{}", conn.interface().as_str(), conn.interface_id());
+    let wanted = outputs.get(&name).and_then(|settings| {
+        if settings.mode.trim().is_empty() { return None; }
+        match parse_output_mode(&settings.mode) {
+            Ok(mode) => Some(mode),
+            Err(e) => {
+                tracing::warn!(%name, mode = %settings.mode, "config: {e}");
+                None
+            }
+        }
+    });
+    let available: Vec<(i32, i32, u32)> = conn
         .modes()
         .iter()
-        .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .or(conn.modes().first())
-        .copied()
-    else {
+        .map(|m| {
+            let (w, h) = m.size();
+            (w as i32, h as i32, m.vrefresh())
+        })
+        .collect();
+    let configured = wanted.and_then(|(w, h, hz)| {
+        choose_mode(&available, w, h, hz).map(|index| {
+            tracing::info!(%name, width = w, height = h, refresh = ?hz, "mode from [outputs]");
+            conn.modes()[index]
+        })
+    });
+    if wanted.is_some() && configured.is_none() {
+        tracing::warn!(%name, "requested output mode is not offered by the monitor; using the preferred mode");
+    }
+    let Some(mode) = configured.or_else(|| {
+        conn.modes()
+            .iter()
+            .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+            .or(conn.modes().first())
+            .copied()
+    }) else {
         return Ok(None);
     };
     let resources = drm.resource_handles()?;
@@ -288,7 +319,6 @@ fn make_head(
         return Ok(None);
     };
 
-    let name = format!("{}-{}", conn.interface().as_str(), conn.interface_id());
     let (w_mm, h_mm) = conn.size().unwrap_or((0, 0));
     let output = Output::new(
         name.clone(),
@@ -323,6 +353,26 @@ fn make_head(
     Ok(Some(Head { output, global, connector: conn.handle(), crtc, compositor, frame_pending: false }))
 }
 
+/// Pick a mode matching `w`x`h` (and the closest refresh within 1.5 Hz when one is requested).
+/// Without a refresh rate, the fastest mode of that size wins. Modes are `(width, height, Hz)`.
+fn choose_mode(available: &[(i32, i32, u32)], w: i32, h: i32, refresh: Option<f64>) -> Option<usize> {
+    let matching: Vec<usize> = available
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.0 == w && m.1 == h)
+        .map(|(i, _)| i)
+        .collect();
+    match refresh {
+        Some(hz) => matching
+            .into_iter()
+            .filter(|&i| (available[i].2 as f64 - hz).abs() <= 1.5)
+            .min_by(|&a, &b| {
+                (available[a].2 as f64 - hz).abs().total_cmp(&(available[b].2 as f64 - hz).abs())
+            }),
+        None => matching.into_iter().max_by_key(|&i| available[i].2),
+    }
+}
+
 /// React to monitors being plugged in or out. The last remaining head is never dropped.
 fn rescan(gpu: &mut Gpu, state: &mut State) {
     let connected = connected_connectors(&gpu.drm);
@@ -344,7 +394,7 @@ fn rescan(gpu: &mut Gpu, state: &mut State) {
         if gpu.heads.iter().any(|h| h.connector == conn.handle()) {
             continue;
         }
-        match make_head(&mut gpu.drm, &gpu.gbm, &gpu.renderer, &gpu.dh, &conn, &gpu.heads) {
+        match make_head(&mut gpu.drm, &gpu.gbm, &gpu.renderer, &gpu.dh, &conn, &gpu.heads, &state.config.outputs) {
             Ok(Some(head)) => {
                 tracing::info!(output = %head.output.name(), "monitor plugged in");
                 state.add_output(head.output.clone());
@@ -432,4 +482,20 @@ fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
 
     state.send_frames(&output, std::time::UNIX_EPOCH.elapsed().unwrap_or_default());
     let _ = state.display_handle.flush_clients();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_mode;
+
+    #[test]
+    fn mode_choice_matches_size_and_refresh() {
+        let modes = [(1920, 1080, 60), (1920, 1080, 75), (1280, 720, 60)];
+        assert_eq!(choose_mode(&modes, 1920, 1080, Some(75.0)), Some(1));
+        assert_eq!(choose_mode(&modes, 1920, 1080, Some(60.0)), Some(0));
+        assert_eq!(choose_mode(&modes, 1920, 1080, Some(59.94)), Some(0));
+        assert_eq!(choose_mode(&modes, 1920, 1080, None), Some(1), "without a rate, take the fastest");
+        assert_eq!(choose_mode(&modes, 1920, 1080, Some(120.0)), None);
+        assert_eq!(choose_mode(&modes, 800, 600, None), None);
+    }
 }

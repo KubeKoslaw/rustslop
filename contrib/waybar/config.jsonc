@@ -46,7 +46,7 @@
     ]
   },
   "custom/launcher": {
-    "format": "\uf135",
+    "format": "\uf009",
     "tooltip": false,
     "on-click": "fuzzel"
   },

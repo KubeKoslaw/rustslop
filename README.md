@@ -6,7 +6,8 @@ A tiling + floating Wayland compositor written in Rust on [Smithay](https://gith
 
 ## Features
 - Dwindle tiling, per-window floating, fullscreen, swap/resize, focus borders, 9 workspaces per monitor
-- Multi-monitor: per-output workspaces, hotplug, moving windows between outputs, fractional scale
+- Multi-monitor: per-output workspaces, hotplug, moving windows between outputs, fractional scale,
+  and forcing a mode per connector (`[outputs.DP-1] mode = "1920x1080@75"`; preferred mode otherwise)
 - xdg-shell (popups, no client decorations), wlr-layer-shell (bars/launchers), clipboard + primary selection
 - XWayland, grim-style screenshots/screencopy, session lock, idle-inhibit, presentation-time
 - TOML config with configurable keybinds, validation, live reload and pywal palettes (`config.example.toml`)

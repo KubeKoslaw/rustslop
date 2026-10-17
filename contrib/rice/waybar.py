@@ -43,7 +43,7 @@ def config(output):
         'modules-right': ['custom/media', 'group/status', 'tray'],
         'group/desktops': {'orientation': 'horizontal', 'modules': [f'custom/ws{i}' for i in range(1, 10)]},
         'group/status': {'orientation': 'horizontal', 'modules': ['pulseaudio', 'network', 'battery', 'custom/system']},
-        'custom/launcher': {'format': '', 'tooltip': False, 'on-click': 'fuzzel'},
+        'custom/launcher': {'format': '\uf009', 'tooltip': False, 'on-click': 'fuzzel'},
         'clock': {'format': '{:%H:%M}', 'tooltip-format': '<big>{:%A, %d %B %Y}</big>\n<tt><small>{calendar}</small></tt>', 'calendar': {'mode': 'month', 'weeks-pos': 'right'}},
         'custom/media': {'exec': command('media', 16 if compact else 28), 'return-type': 'json', 'interval': 2,
             'on-click': 'playerctl play-pause', 'on-scroll-up': 'playerctl next', 'on-scroll-down': 'playerctl previous', 'escape': False},
@@ -54,8 +54,8 @@ def config(output):
         'tray': {'icon-size': 16, 'spacing': 10},
     }
     for i in range(1, 10):
-        cfg[f'custom/ws{i}'] = {'exec': command('workspace', name, i), 'return-type': 'json', 'interval': 1,
-            'on-click': command('switch', name, i), 'tooltip': True}
+        cfg[f'custom/ws{i}'] = {'exec': command('workspace', name, i), 'return-type': 'json', 'interval': 10,
+            'signal': 8, 'on-click': command('switch', name, i), 'tooltip': True}
     if not any(Path('/sys/class/power_supply').glob('*/capacity')):
         cfg['group/status']['modules'].remove('battery')
     return cfg
@@ -80,12 +80,13 @@ def supervise():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     with tempfile.TemporaryDirectory(prefix='rusted-bar-', dir=os.environ.get('XDG_RUNTIME_DIR')) as tmp:
+        last_state = None
         try:
             while running:
                 try: outputs = json.loads(ctl('outputs-json'))
                 except (OSError, ValueError): outputs = []
                 desired = {o['name']: o for o in outputs}
-                for name, (proc, size) in list(children.items()):
+                for name, (proc, size, _) in list(children.items()):
                     o = desired.get(name)
                     if not o or size != (o['width'], o['scale']) or proc.poll() is not None:
                         if proc.poll() is None: proc.terminate(); proc.wait(timeout=4)
@@ -95,12 +96,22 @@ def supervise():
                     path = Path(tmp) / (str(len(children)) + '.json')
                     path.write_text(json.dumps(config(o)))
                     proc = subprocess.Popen(['waybar', '-c', str(path), '-s', str(ROOT / 'style.css')], env=os.environ | {'GDK_BACKEND': 'wayland'})
-                    children[name] = (proc, (o['width'], o['scale']))
-                time.sleep(1)
+                    children[name] = (proc, (o['width'], o['scale']), time.monotonic())
+                # The workspace pills listen on SIGRTMIN+8; poke them as soon as anything changes
+                # instead of waiting for Waybar's own (slow) module timer. A fresh bar needs a
+                # moment before it has installed its handlers, so give it a second.
+                state = json.dumps([[o['name'], [[w['number'], w['active'], w['windows']] for w in o['workspaces']]] for o in outputs])
+                if state != last_state:
+                    last_state = state
+                    for proc, _, started in children.values():
+                        if time.monotonic() - started < 1.0 or proc.poll() is not None: continue
+                        try: proc.send_signal(signal.SIGRTMIN + 8)
+                        except OSError: pass
+                time.sleep(0.1)
         finally:
-            for proc, _ in children.values():
+            for proc, _, _ in children.values():
                 if proc.poll() is None: proc.terminate()
-            for proc, _ in children.values():
+            for proc, _, _ in children.values():
                 try: proc.wait(timeout=4)
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
 

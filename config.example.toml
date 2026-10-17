@@ -26,6 +26,12 @@ file_manager = "xdg-open ."
 lock = "swaylock -f -c 000000"
 settings = "rusted-settings"      # the GUI settings app (mod+s)
 
+# Per-output overrides, keyed by connector name (see `rusted-wm ctl info` or the session log).
+# mode = "WIDTHxHEIGHT[@REFRESH]" forces a mode; without it the monitor's preferred mode is used.
+# Example: run a 75 Hz panel at 75 Hz instead of its preferred 60 Hz.
+# [outputs.DP-1]
+# mode = "1920x1080@75"
+
 [input]
 layout = ""           # xkb layout, e.g. "pl" or "us,de" (empty = system default)
 variant = ""

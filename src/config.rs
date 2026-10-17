@@ -66,6 +66,35 @@ impl Default for Colors {
     }
 }
 
+/// Per-output overrides, keyed by connector name (`DP-1`, `HDMI-A-1`, ...).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct OutputSettings {
+    /// `"1920x1080"` or `"1920x1080@75"`; empty means the monitor's preferred mode.
+    pub mode: String,
+}
+
+/// Parse `WIDTHxHEIGHT` or `WIDTHxHEIGHT@REFRESH` (refresh may be fractional, e.g. `59.94`).
+pub fn parse_output_mode(s: &str) -> Result<(i32, i32, Option<f64>), String> {
+    let (size, refresh) = match s.split_once('@') {
+        Some((size, hz)) => {
+            let hz = hz.trim().parse::<f64>().map_err(|_| "refresh rate is not a number".to_string())?;
+            if !(1.0..=500.0).contains(&hz) {
+                return Err("refresh rate is outside 1-500 Hz".into());
+            }
+            (size, Some(hz))
+        }
+        None => (s, None),
+    };
+    let (w, h) = size.split_once('x').ok_or_else(|| "expected WIDTHxHEIGHT[@REFRESH]".to_string())?;
+    let w: i32 = w.trim().parse().map_err(|_| "width is not a number".to_string())?;
+    let h: i32 = h.trim().parse().map_err(|_| "height is not a number".to_string())?;
+    if !(1..=16384).contains(&w) || !(1..=16384).contains(&h) {
+        return Err("size is outside 1-16384".into());
+    }
+    Ok((w, h, refresh))
+}
+
 /// pywal's `~/.cache/wal/colors.json` (`$RUSTED_WAL_FILE` overrides the location).
 pub fn wal_path() -> PathBuf {
     if let Some(p) = std::env::var_os("RUSTED_WAL_FILE") {
@@ -241,6 +270,8 @@ struct RawConfig {
     input: Input,
     colors: Colors,
     autostart: Vec<String>,
+    /// Per-connector overrides, e.g. `[outputs.DP-1] mode = "1920x1080@75"`.
+    outputs: BTreeMap<String, OutputSettings>,
     /// "mod+shift+1" = "move-to-workspace:1"; merged over the defaults, "none" removes a bind.
     keybinds: BTreeMap<String, String>,
 }
@@ -277,6 +308,8 @@ pub struct Config {
     /// Set when the colours come from pywal: the file to watch for changes.
     pub pywal_file: Option<PathBuf>,
     pub autostart: Vec<String>,
+    /// Per-output mode overrides, keyed by connector name.
+    pub outputs: BTreeMap<String, OutputSettings>,
     pub bindings: Vec<Binding>,
 }
 
@@ -502,7 +535,17 @@ impl Config {
         };
         let mut appearance = raw.appearance;
         appearance.validate(&mut problems);
-        (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, bindings }, problems)
+        let mut outputs = raw.outputs;
+        for (name, settings) in outputs.iter_mut() {
+            if settings.mode.trim().is_empty() {
+                continue;
+            }
+            if let Err(e) = parse_output_mode(&settings.mode) {
+                problems.push(format!("outputs.{name}.mode = {:?}: {e}; using the preferred mode", settings.mode));
+                settings.mode.clear();
+            }
+        }
+        (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, outputs, bindings }, problems)
     }
 }
 
@@ -545,6 +588,22 @@ fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
     };
 
     for (key, value) in table {
+        if key == "outputs" {
+            let Some(per_output) = value.as_table() else {
+                problems.push("`outputs` must be a table of [outputs.CONNECTOR] tables".into());
+                continue;
+            };
+            for (connector, settings) in per_output {
+                let Some(inner) = settings.as_table() else {
+                    problems.push(format!("[outputs.{connector}] must be a table"));
+                    continue;
+                };
+                for k in inner.keys().filter(|k| k.as_str() != "mode") {
+                    problems.push(format!("unknown key `{k}` in [outputs.{connector}]; only `mode` is supported"));
+                }
+            }
+            continue;
+        }
         if !top.contains(&key.as_str()) {
             let hint = match (home(key), suggest(key, &top)) {
                 (Some(h), _) => format!(" — it is {h}"),
@@ -685,6 +744,25 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(c.bindings.len(), DEFAULT_KEYBINDS.len());
         assert_eq!(c.general.gap, 12);
+    }
+
+    #[test]
+    fn output_modes_parse_and_validate() {
+        assert_eq!(parse_output_mode("1920x1080"), Ok((1920, 1080, None)));
+        assert_eq!(parse_output_mode("1920x1080@75"), Ok((1920, 1080, Some(75.0))));
+        assert_eq!(parse_output_mode("2560x1440 @ 59.94"), Ok((2560, 1440, Some(59.94))));
+        for bad in ["1920", "1920x", "x1080", "1920x1080@0", "1920x1080@fast", "0x1080"] {
+            assert!(parse_output_mode(bad).is_err(), "{bad} should be rejected");
+        }
+        let (config, problems) = Config::parse(
+            "[outputs.DP-1]\nmode = \"1920x1080@75\"\n[outputs.HDMI-A-1]\nmode = \"1920x0\"",
+            false,
+        );
+        assert_eq!(config.outputs["DP-1"].mode, "1920x1080@75");
+        assert!(config.outputs["HDMI-A-1"].mode.is_empty(), "invalid mode is dropped");
+        assert!(problems.iter().any(|p| p.contains("outputs.HDMI-A-1.mode")), "{problems:?}");
+        let (_, problems) = Config::parse("[outputs.DP-1]\nmodel = \"x\"", false);
+        assert!(problems.iter().any(|p| p.contains("only `mode` is supported")), "{problems:?}");
     }
 
     #[test]

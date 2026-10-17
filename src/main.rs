@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("config: {p}");
     }
     let (winit, tty, headless) = match (use_tty, headless) {
-        (true, _) => (None, Some(Tty::new(&dh)?), None),
+        (true, _) => (None, Some(Tty::new(&dh, &config.outputs)?), None),
         (false, true) => (None, None, Some(Headless::new(&dh)?)),
         (false, false) => (Some(Winit::new(&dh)?), None, None),
     };
