@@ -79,6 +79,8 @@ pub struct State {
     pub drag: Option<Drag>,
     pub output: Output,
     pub config: Config,
+    /// Screenshot requested over the control socket; served by the backend after the next frame.
+    pub pending_shot: Option<(std::path::PathBuf, std::os::unix::net::UnixStream)>,
     pub running: bool,
 }
 

@@ -42,6 +42,10 @@ impl Control {
         Ok(Self { listener, path })
     }
 
+    pub fn fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.listener)
+    }
+
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
