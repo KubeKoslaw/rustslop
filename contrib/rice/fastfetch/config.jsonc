@@ -11,7 +11,14 @@
   "display": {
     "separator": "  ",
     "color": { "keys": "magenta", "title": "magenta", "output": "white", "separator": "dim_magenta" },
-    "key": { "width": 11 }
+    "key": { "width": 11 },
+    "bar": {
+      "char": { "elapsed": "▄", "total": "▄" },
+      "border": null,
+      "width": 10,
+      "color": { "total": "#343a4e" }
+    },
+    "percent": { "type": ["num", "bar"] }
   },
   "modules": [
     "title",
@@ -26,8 +33,8 @@
     { "type": "command", "key": "CPU",
       "text": "lscpu | sed -n 's/^Model name:[[:space:]]*//p' | sed 's/(R)//g; s/(TM)//g; s/13th Gen //; s/ CPU @.*//'" },
     { "type": "gpu", "format": "{name}" },
-    "memory",
-    { "type": "disk", "folders": "/" },
+    { "type": "memory", "key": "RAM", "format": "{percentage-bar}  {percentage}  ({used} / {total})" },
+    { "type": "disk", "key": "DISK", "folders": "/", "format": "{size-percentage-bar}  {size-percentage}  ({size-used} / {size-total})" },
     { "type": "colors", "symbol": "circle" }
   ]
 }
