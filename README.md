@@ -1,5 +1,6 @@
 # rustslop
 yet another desktop manager ( but in rust ) 
+fun project
 
 A tiling + floating Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay).
 
