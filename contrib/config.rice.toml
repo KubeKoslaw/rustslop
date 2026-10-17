@@ -9,6 +9,7 @@
 # Started once, through `sh -c` (so $HOME works).
 autostart = [
   # Audio daemons: nothing starts them on a bare TTY (KDE did it for you). Skipped when already running.
+  # On Gentoo/OpenRC the single `"gentoo-pipewire-launcher"` replaces the three lines below.
   "sh -c 'pgrep -x pipewire >/dev/null || pipewire'",
   "sh -c 'pgrep -x wireplumber >/dev/null || wireplumber'",
   "sh -c 'pgrep -x pipewire-pulse >/dev/null || pipewire-pulse'",

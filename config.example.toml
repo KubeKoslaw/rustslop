@@ -4,6 +4,8 @@
 # Programs started once when the compositor starts (run through `sh -c`).
 autostart = [
   # "waybar",
+  # On Gentoo/OpenRC one command starts pipewire, pipewire-pulse and wireplumber in this session:
+  # "gentoo-pipewire-launcher",
 ]
 
 [general]
