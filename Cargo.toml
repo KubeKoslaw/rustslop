@@ -1,0 +1,10 @@
+[package]
+name = "rusted-wm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+png = "0.18.1"
+smithay = { version = "0.7.0", default-features = false, features = ["backend_winit", "renderer_glow", "wayland_frontend", "desktop"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
