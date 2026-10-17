@@ -34,11 +34,6 @@ file_manager = "dolphin"
 lock = "swaylock -f -i ~/.config/rusted-rice/wallpapers/lock.png"
 settings = "rusted-settings"
 
-[colors]
-# pywal = true            # border + background colours from `wal -i IMAGE` (live)
-# pywal_focused = "color4"
-# pywal_unfocused = "color8"
-
 [audio]
 step = 5
 max_volume = 100
@@ -70,6 +65,8 @@ mouse_natural_scroll = false  # mice keep the normal wheel direction
 focused = "#B4A1F5"
 unfocused = "#383C50"
 background = "#14151D"
+# pywal = true: take these three colours from `wal -i IMAGE` instead (follows it live).
+# pywal_focused = "color4"; pywal_unfocused = "color8"; pywal_background = "background"
 pywal = false
 
 [appearance]
