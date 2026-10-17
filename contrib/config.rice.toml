@@ -41,7 +41,8 @@ notify = true
 [input]
 # layout = "pl"     # keyboard layout: set this on a real TTY!
 tap_to_click = true
-natural_scroll = true
+natural_scroll = true        # touchpads only
+mouse_natural_scroll = false  # mice keep the normal wheel direction
 
 [keybinds]
 # launchers (mod+d = @launcher, mod+shift+x = @lock are defaults; see [apps])

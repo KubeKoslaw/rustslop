@@ -62,6 +62,8 @@ pub struct Input {
     pub repeat_rate: i32,
     pub tap_to_click: bool,
     pub natural_scroll: bool,
+    /// Natural scrolling for mice (wheel direction); touchpads use `natural_scroll`.
+    pub mouse_natural_scroll: bool,
 }
 
 impl Default for Input {
@@ -74,6 +76,7 @@ impl Default for Input {
             repeat_rate: 25,
             tap_to_click: true,
             natural_scroll: false,
+            mouse_natural_scroll: false,
         }
     }
 }

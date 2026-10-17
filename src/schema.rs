@@ -57,6 +57,7 @@ pub const SETTINGS: &[Setting] = &[
     s("input", "repeat_rate", Kind::Int { min: 1, max: 200 }, "25", "Key repeats per second.", true),
     s("input", "tap_to_click", Kind::Bool, "true", "Touchpad tap-to-click.", true),
     s("input", "natural_scroll", Kind::Bool, "false", "Touchpad natural scrolling.", true),
+    s("input", "mouse_natural_scroll", Kind::Bool, "false", "Natural scrolling for mice (reverses the wheel).", true),
     s("colors", "focused", Kind::Color, "\"#73a6ff\"", "Border colour of the focused window.", false),
     s("colors", "unfocused", Kind::Color, "\"#40455a\"", "Border colour of other windows.", false),
     s("colors", "background", Kind::Color, "\"#14141f\"", "Desktop background colour.", false),

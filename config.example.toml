@@ -32,7 +32,8 @@ options = ""          # e.g. "caps:escape"
 repeat_delay = 200    # ms
 repeat_rate = 25      # keys/s
 tap_to_click = true   # touchpads (TTY session only)
-natural_scroll = false
+natural_scroll = false        # touchpads only
+mouse_natural_scroll = false  # mice (wheel direction); leave false for the usual behaviour
 
 [colors]
 focused = "#73a6ff"

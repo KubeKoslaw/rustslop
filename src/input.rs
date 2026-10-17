@@ -311,11 +311,15 @@ impl State {
         let any: &dyn std::any::Any = device;
         if let Some(dev) = any.downcast_ref::<LibinputDevice>() {
             let mut dev = dev.clone();
-            if dev.config_tap_finger_count() > 0 {
+            // Touchpads report tap fingers; mice do not. Natural scrolling is a separate choice for
+            // each: it used to apply to mice too, which made the wheel scroll backwards.
+            let touchpad = dev.config_tap_finger_count() > 0;
+            if touchpad {
                 let _ = dev.config_tap_set_enabled(self.config.input.tap_to_click);
             }
             if dev.config_scroll_has_natural_scroll() {
-                let _ = dev.config_scroll_set_natural_scroll_enabled(self.config.input.natural_scroll);
+                let natural = if touchpad { self.config.input.natural_scroll } else { self.config.input.mouse_natural_scroll };
+                let _ = dev.config_scroll_set_natural_scroll_enabled(natural);
             }
         }
     }
