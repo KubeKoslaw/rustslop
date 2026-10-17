@@ -54,6 +54,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    // `rusted-wm --check-config [FILE]`: validate a config file and exit (0 = fine, 1 = problems).
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--check-config") {
+        let path = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(Config::path);
+        let (config, problems) = Config::load_file(&path, true);
+        println!("checking {}", path.display());
+        for p in &problems {
+            println!("  problem: {p}");
+        }
+        if problems.is_empty() {
+            println!("config OK: {} keybinds, {} autostart entries", config.bindings.len(), config.autostart.len());
+        }
+        std::process::exit(i32::from(!problems.is_empty()));
+    }
+
     let mut event_loop: EventLoop<State> = EventLoop::try_new()?;
     let handle = event_loop.handle();
     let display: Display<State> = Display::new()?;

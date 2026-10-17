@@ -94,6 +94,9 @@ check "scale 2 halves the logical output width" $([ "$($CTL info | sed -n 's/^ou
 $CTL shot "$OUT/scaled.png" >/dev/null
 : > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
 check "scale restored" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = "$W0" ]; echo $?)
+printf '[general]\ngapp = 3\n' > "$OUT/config.toml"
+check "reload reports an unknown config key with a hint" $($CTL reload | grep -q "did you mean .gap."; echo $?)
+: > "$OUT/config.toml"; $CTL reload >/dev/null
 
 # ---- status helpers for bars ----
 check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)

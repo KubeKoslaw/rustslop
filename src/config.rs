@@ -92,6 +92,8 @@ struct RawConfig {
 /// One parsed keybind.
 #[derive(Debug, Clone)]
 pub struct Binding {
+    /// As written in the config ("mod+shift+1"), for messages.
+    pub key: String,
     pub logo: bool,
     pub alt: bool,
     pub ctrl: bool,
@@ -185,9 +187,26 @@ impl Config {
     }
 
     pub fn parse(text: &str, real_session: bool) -> (Self, Vec<String>) {
+        // Unknown keys are reported (typos, keys in the wrong section) but never fatal.
+        let mut problems = match text.parse::<toml::Table>() {
+            Ok(table) => unknown_key_problems(&table),
+            Err(e) => return (Self::default(), vec![format!("config parse error: {e}")]),
+        };
         match toml::from_str::<RawConfig>(text) {
-            Ok(raw) => Self::from_raw(raw, real_session),
+            Ok(raw) => {
+                let (config, more) = Self::from_raw(raw, real_session);
+                problems.extend(more);
+                (config, problems)
+            }
             Err(e) => (Self::default(), vec![format!("config parse error: {e}")]),
+        }
+    }
+
+    /// Load a specific file (used by `--check-config`).
+    pub fn load_file(path: &std::path::Path, real_session: bool) -> (Self, Vec<String>) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse(&text, real_session),
+            Err(e) => (Self::default(), vec![format!("cannot read {}: {e}", path.display())]),
         }
     }
 
@@ -230,6 +249,44 @@ impl Config {
             }
         }
 
+        // Report values that get clamped instead of silently changing them.
+        let g = &raw.general;
+        if g.gap < 0 || g.border < 0 {
+            problems.push(format!("general.gap/border cannot be negative (gap = {}, border = {}), using 0", g.gap, g.border));
+        } else if g.border > g.gap {
+            problems.push(format!("general.border ({}) is larger than general.gap ({}): borders will overlap neighbouring windows", g.border, g.gap));
+        }
+        if !(crate::layout::MIN_RATIO..=crate::layout::MAX_RATIO).contains(&g.split_ratio) {
+            problems.push(format!(
+                "general.split_ratio {} is outside {}-{}, clamped",
+                g.split_ratio,
+                crate::layout::MIN_RATIO,
+                crate::layout::MAX_RATIO
+            ));
+        }
+        if !(0.5..=4.0).contains(&g.scale) {
+            problems.push(format!("general.scale {} is outside 0.5-4, clamped", g.scale));
+        }
+        if raw.input.repeat_delay <= 0 || raw.input.repeat_rate <= 0 {
+            problems.push(format!(
+                "input.repeat_delay/repeat_rate must be positive (got {}/{})",
+                raw.input.repeat_delay, raw.input.repeat_rate
+            ));
+        }
+        for (i, a) in raw.autostart.iter().enumerate() {
+            if a.trim().is_empty() {
+                problems.push(format!("autostart entry #{} is empty", i + 1));
+            }
+        }
+        for (i, b) in bindings.iter().enumerate() {
+            if let Some(first) = bindings[..i].iter().find(|o| (o.logo, o.alt, o.ctrl, o.shift, o.sym) == (b.logo, b.alt, b.ctrl, b.shift, b.sym)) {
+                problems.push(format!(
+                    "keybinds {:?} ({:?}) and {:?} ({:?}) are the same keys; the first one wins",
+                    first.key, first.action, b.key, b.action
+                ));
+            }
+        }
+
         let general = General {
             gap: raw.general.gap.max(0),
             border: raw.general.border.max(0),
@@ -242,6 +299,73 @@ impl Config {
     }
 }
 
+/// Keys each section accepts. A unit test checks these against `config.example.toml`.
+const TOP_KEYS: &[&str] = &["general", "input", "colors", "autostart", "keybinds"];
+const GENERAL_KEYS: &[&str] = &["gap", "border", "terminal", "split_ratio", "modifier", "scale", "xwayland"];
+const INPUT_KEYS: &[&str] = &["layout", "variant", "options", "repeat_delay", "repeat_rate", "tap_to_click", "natural_scroll"];
+const COLORS_KEYS: &[&str] = &["focused", "unfocused", "background"];
+
+/// Closest candidate to `name` (a likely typo), if any is close enough.
+fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    fn distance(a: &str, b: &str) -> usize {
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.iter().enumerate() {
+            let mut cur = vec![i + 1];
+            for (j, cb) in b.iter().enumerate() {
+                cur.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+            }
+            prev = cur;
+        }
+        prev[b.len()]
+    }
+    candidates
+        .iter()
+        .map(|c| (distance(&name.to_ascii_lowercase(), c), *c))
+        .filter(|(d, c)| *d < c.len() && *d <= 2.max(c.len() / 2))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Report every key the parser would silently ignore.
+fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
+    let mut problems = Vec::new();
+    let sections: [(&str, &[&str]); 3] = [("general", GENERAL_KEYS), ("input", INPUT_KEYS), ("colors", COLORS_KEYS)];
+    // Where a known key really lives, to say so when it is in the wrong place.
+    let home = |key: &str| -> Option<String> {
+        if TOP_KEYS.contains(&key) {
+            return Some("a top-level key (put it above the first [section])".into());
+        }
+        sections.iter().find(|(_, keys)| keys.contains(&key)).map(|(s, _)| format!("a [{s}] key"))
+    };
+
+    for (key, value) in table {
+        if !TOP_KEYS.contains(&key.as_str()) {
+            let hint = match (home(key), suggest(key, TOP_KEYS)) {
+                (Some(h), _) => format!(" — it is {h}"),
+                (None, Some(s)) => format!(" — did you mean `{s}`?"),
+                (None, None) => String::new(),
+            };
+            problems.push(format!("unknown top-level key `{key}`{hint}; it is ignored"));
+            continue;
+        }
+        let Some((_, keys)) = sections.iter().find(|(s, _)| s == key) else { continue };
+        let Some(inner) = value.as_table() else {
+            problems.push(format!("`{key}` must be a [{key}] table"));
+            continue;
+        };
+        for k in inner.keys().filter(|k| !keys.contains(&k.as_str())) {
+            let hint = match (home(k), suggest(k, keys)) {
+                (Some(h), _) => format!(" — it is {h}, not part of [{key}]"),
+                (None, Some(s)) => format!(" — did you mean `{s}`?"),
+                (None, None) => String::new(),
+            };
+            problems.push(format!("unknown key `{k}` in [{key}]{hint}; it is ignored"));
+        }
+    }
+    problems
+}
+
 fn parse_color(s: &str) -> Option<Color32F> {
     let h = s.strip_prefix('#')?;
     if !(h.len() == 6 || h.len() == 8) || !h.is_ascii() {
@@ -252,7 +376,7 @@ fn parse_color(s: &str) -> Option<Color32F> {
 }
 
 fn parse_binding(key: &str, super_mod: bool) -> Result<Binding, String> {
-    let mut b = Binding { logo: false, alt: false, ctrl: false, shift: false, sym: 0, action: Action::Quit };
+    let mut b = Binding { key: key.to_string(), logo: false, alt: false, ctrl: false, shift: false, sym: 0, action: Action::Quit };
     let mut sym = None;
     for part in key.split('+').map(str::trim) {
         match part.to_ascii_lowercase().as_str() {
@@ -338,6 +462,44 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(c.bindings.len(), DEFAULT_KEYBINDS.len());
         assert_eq!(c.general.gap, 12);
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_with_hints() {
+        let (_, p) = Config::parse("[general]\ngapp = 3\nautostart = [\"x\"]\n[keybinding]\n\"mod+q\" = \"close\"", false);
+        let all = p.join("\n");
+        assert!(all.contains("unknown key `gapp` in [general] — did you mean `gap`?"), "{all}");
+        assert!(all.contains("unknown key `autostart` in [general] — it is a top-level key"), "{all}");
+        assert!(all.contains("unknown top-level key `keybinding` — did you mean `keybinds`?"), "{all}");
+        // The valid parts of a config with unknown keys still apply.
+        let (c, _) = Config::parse("[general]\ngap = 7\nbogus = 1", false);
+        assert_eq!(c.general.gap, 7);
+    }
+
+    #[test]
+    fn out_of_range_values_and_conflicts_are_reported() {
+        let (_, p) = Config::parse(
+            "[general]\ngap = -1\nscale = 9\nsplit_ratio = 0.99\n[keybinds]\n\"mod+x\" = \"close\"\n\"mod+X\" = \"quit\"",
+            false,
+        );
+        let all = p.join("\n");
+        assert!(all.contains("cannot be negative"), "{all}");
+        assert!(all.contains("general.scale 9"), "{all}");
+        assert!(all.contains("split_ratio"), "{all}");
+        assert!(all.contains("are the same keys"), "{all}");
+    }
+
+    #[test]
+    fn key_lists_match_the_example_config() {
+        let example = include_str!("../config.example.toml");
+        for key in GENERAL_KEYS.iter().chain(INPUT_KEYS).chain(COLORS_KEYS) {
+            assert!(example.contains(&format!("{key} =")), "config.example.toml does not document `{key}`");
+        }
+        // And the shipped examples produce no unknown-key complaints.
+        for text in [example, include_str!("../contrib/config.rice.toml")] {
+            let table: toml::Table = text.parse().unwrap();
+            assert!(unknown_key_problems(&table).is_empty());
+        }
     }
 
     #[test]
