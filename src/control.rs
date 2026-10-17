@@ -119,6 +119,13 @@ impl State {
                 Some("j") => self.run_action(Action::FocusDir(0, 1)),
                 _ => return err("focus h|j|k|l"),
             },
+            Some("ws") if matches!(parts.get(1).copied(), Some("next" | "prev")) => {
+                let n = crate::wm::WORKSPACE_COUNT;
+                let cur = self.current_ws();
+                let target = if parts[1] == "next" { (cur + 1) % n } else { (cur + n - 1) % n };
+                self.run_action(Action::Workspace(target));
+            }
+            Some("ws-json") => return Reply::Text(self.workspaces_json(parts.get(1).copied())),
             Some("ws") => match num(1) {
                 Some(n) if n >= 1.0 => self.run_action(Action::Workspace(n as usize - 1)),
                 _ => return err("ws N (1-9)"),
@@ -172,9 +179,40 @@ impl State {
                 _ => return err("mvout h|j|k|l"),
             },
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N|next|prev, ws-json [OUTPUT], mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
         }
         ok()
+    }
+
+    /// Waybar `custom` module payload (`return-type: json`): occupied and visible workspaces with
+    /// Pango markup. With an output name, "current" means the workspace shown on that output.
+    fn workspaces_json(&self, output: Option<&str>) -> String {
+        let mon = output
+            .and_then(|name| self.outputs.iter().position(|m| m.output.name() == name))
+            .unwrap_or(self.focused);
+        let shown = self.outputs[mon].ws;
+        let mut text = Vec::new();
+        for (i, ws) in self.workspaces.iter().enumerate() {
+            let visible_elsewhere = self.outputs.iter().enumerate().any(|(m, o)| m != mon && o.ws == i);
+            let label = if i == shown {
+                format!("<span foreground='#8aadf4'><b> {} </b></span>", i + 1)
+            } else if visible_elsewhere {
+                format!("<u> {} </u>", i + 1)
+            } else if !ws.entries.is_empty() {
+                format!(" {} ", i + 1)
+            } else {
+                continue;
+            };
+            text.push(label);
+        }
+        let windows: usize = self.workspaces[shown].entries.len();
+        format!(
+            "{{\"text\": \"{}\", \"tooltip\": \"workspace {} ({} window(s))\", \"class\": \"ws-{}\"}}",
+            text.join("").replace('\'', "\\u0027"),
+            shown + 1,
+            windows,
+            shown + 1
+        )
     }
 
     /// Human/AI readable dump of the whole window state.

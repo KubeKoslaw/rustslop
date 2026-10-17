@@ -80,6 +80,11 @@ $CTL shot "$OUT/scaled.png" >/dev/null
 : > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
 check "scale restored" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = "$W0" ]; echo $?)
 
+# ---- status helpers for bars ----
+check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)
+$CTL ws next >/dev/null; check "ws next goes to workspace 2" $($CTL info | grep -q "current_ws=2"; echo $?)
+$CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "current_ws=1"; echo $?)
+
 # ---- Xwayland: a Qt app forced onto the X11 backend ----
 N0=$(n_windows)
 $CTL exec env QT_QPA_PLATFORM=xcb konsole >/dev/null; sleep 6

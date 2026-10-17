@@ -1,0 +1,4 @@
+* { font-family: "Noto Sans", sans-serif; font-size: 13px; }
+window#waybar { background: rgba(20, 21, 30, 0.92); color: #cad3f5; }
+#custom-workspaces, #clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray { padding: 0 10px; }
+#clock { font-weight: bold; }

@@ -11,7 +11,8 @@ name = None
 if args[:1] == ["-s"]:
     name, args = args[1], args[2:]
 rt = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
-path = os.path.join(rt, f"{name}-ctl") if name else None
+name = name or os.environ.get("WAYLAND_DISPLAY")  # children of the compositor find it directly
+path = os.path.join(rt, f"{name}-ctl") if name and os.path.exists(os.path.join(rt, f"{name}-ctl")) else None
 if path is None:
     found = sorted(glob.glob(os.path.join(rt, "rusted-*-ctl")), key=os.path.getmtime)
     if not found:

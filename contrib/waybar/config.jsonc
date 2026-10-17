@@ -1,0 +1,26 @@
+// Example Waybar config for rusted-wm. Copy to ~/.config/waybar/ and adjust the path to ctl.py.
+// rusted-wm has no sway/hyprland IPC, so the workspace indicator is a `custom` module fed by the
+// compositor's control socket (`ctl.py ws-json`). Scroll over it to change workspace.
+{
+  "layer": "top",
+  "position": "top",
+  "height": 30,
+  "modules-left": ["custom/workspaces"],
+  "modules-center": ["clock"],
+  "modules-right": ["pulseaudio", "network", "cpu", "memory", "battery", "tray"],
+
+  "custom/workspaces": {
+    "exec": "$HOME/Dokumenty/rustslop/tools/ctl.py ws-json",
+    "return-type": "json",
+    "interval": 1,
+    "on-scroll-up": "$HOME/Dokumenty/rustslop/tools/ctl.py ws prev",
+    "on-scroll-down": "$HOME/Dokumenty/rustslop/tools/ctl.py ws next"
+  },
+  "clock": { "format": "{:%a %d %b  %H:%M}" },
+  "cpu": { "format": "cpu {usage}%" },
+  "memory": { "format": "mem {percentage}%" },
+  "battery": { "format": "bat {capacity}%" },
+  "network": { "format-wifi": "{essid}", "format-ethernet": "eth", "format-disconnected": "offline" },
+  "pulseaudio": { "format": "vol {volume}%", "on-click": "pavucontrol" },
+  "tray": { "spacing": 8 }
+}
