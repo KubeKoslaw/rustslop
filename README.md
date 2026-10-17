@@ -51,6 +51,11 @@ every interactive **foot** shell: the installer drops the config in `~/.config/f
 `~/.config/rusted-rice/fastfetch.bash`, and adds one source line to `~/.bashrc` (`--no-bashrc` opts out).
 Other terminals and non-interactive shells stay quiet.
 
+The **Theme** page (`rusted-settings --page=theme`) has a pywal switch: when it is on, window borders, the
+desktop background and Waybar follow the current wallpaper. `contrib/rice/palette.py` writes
+`~/.cache/wal/colors.json` (using `wal` when it is installed, otherwise a built-in Pillow extractor), the
+wallpaper helper regenerates it whenever the wallpaper changes, and everything reloads live.
+
 `rusted-settings` (built from the workspace) edits the same config through the same CLI, with schema-driven
 pages for general options, keybinds, default apps, input, colors, wallpaper, appearance and audio. The
 Wallpaper page previews the current image, offers a file picker and thumbnails of everything in

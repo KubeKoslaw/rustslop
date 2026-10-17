@@ -15,6 +15,11 @@ import time
 import tomllib
 from pathlib import Path
 
+try:
+    import palette
+except ImportError:  # palette.py lives next to this script in the installed rice
+    palette = None
+
 MODES = ("fill", "fit", "stretch", "center", "tile")
 
 
@@ -30,7 +35,7 @@ def read():
         with open(config_path(), "rb") as stream:
             data = tomllib.load(stream)
     except FileNotFoundError:
-        return ("", "fill")
+        return ("", "fill", False)
     except (OSError, tomllib.TOMLDecodeError) as error:
         print(f"wallpaper: cannot read {config_path()}: {error}", file=sys.stderr)
         return None
@@ -40,7 +45,23 @@ def read():
     if mode not in MODES:
         print(f"wallpaper: unknown mode {mode!r}, using fill", file=sys.stderr)
         mode = "fill"
-    return (os.path.expanduser(os.path.expandvars(image)), mode)
+    pywal = bool(data.get("colors", {}).get("pywal", False))
+    return (os.path.expanduser(os.path.expandvars(image)), mode, pywal)
+
+
+def refresh_palette(image):
+    """Regenerate the pywal-compatible palette when it does not match the wallpaper."""
+    if palette is None or not image or not Path(image).is_file():
+        return
+    try:
+        out = palette.wal_path()
+        if out.is_file() and Path(image).stat().st_mtime <= out.stat().st_mtime:
+            data = palette.load()
+            if data and data.get("wallpaper") == image:
+                return
+        palette.generate(image)
+    except Exception as error:  # never take the wallpaper down with it
+        print(f"wallpaper: palette generation failed: {error}", file=sys.stderr)
 
 
 def session_alive():
@@ -96,12 +117,14 @@ def main():
                 current = settings
                 stop(child)
                 child = None
-                image, mode = current
+                image, mode, pywal = current
                 if image and Path(image).is_file():
                     try:
                         child = subprocess.Popen(["swaybg", "-i", image, "-m", mode])
                     except FileNotFoundError:
                         print("wallpaper: swaybg is not installed", file=sys.stderr)
+                    if pywal:
+                        refresh_palette(image)
                 elif image:
                     print(f"wallpaper: {image} does not exist", file=sys.stderr)
         # Exit with the session instead of lingering as a second watcher after a restart.

@@ -11,8 +11,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 
 ROOT = Path(__file__).resolve().parent
+
+try:
+    import palette
+except ImportError:  # palette.py lives next to this script in the installed rice
+    palette = None
 
 def ctl(*args):
     runtime = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp'))
@@ -71,6 +77,65 @@ def get_media(limit):
     except (OSError, subprocess.TimeoutExpired):
         return {'text': ''}
 
+def config_path():
+    if path := os.environ.get('RUSTED_CONFIG'):
+        return Path(path)
+    base = Path(os.environ.get('XDG_CONFIG_HOME') or (Path.home() / '.config'))
+    return base / 'rusted-wm' / 'config.toml'
+
+def pywal_enabled():
+    try:
+        with open(config_path(), 'rb') as stream:
+            return bool(tomllib.load(stream).get('colors', {}).get('pywal', False))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+
+def rgba(hexcolor, alpha):
+    value = hexcolor.lstrip('#')
+    r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    return f'rgba({r}, {g}, {b}, {alpha})'
+
+def palette_overrides(data):
+    special = data.get('special', {})
+    colors = data.get('colors', {})
+    bg = special.get('background', '#14151d')
+    fg = special.get('foreground', '#e6e7ef')
+    accent = colors.get('color4', '#b4a1f5')
+    dim = colors.get('color8', '#969baf')
+    return f"""
+/* pywal palette from the current wallpaper */
+window#waybar {{ color: {fg}; }}
+#custom-launcher, #desktops, #clock, #custom-media, #status, #tray {{
+  background: {rgba(bg, 0.88)};
+  border-color: {rgba(accent, 0.18)};
+}}
+#custom-launcher, #custom-media {{ color: {accent}; }}
+#desktops .occupied {{ color: {fg}; background: {rgba(dim, 0.10)}; }}
+#desktops .active {{ background: {accent}; color: {bg}; }}
+#desktops .empty {{ color: {dim}; }}
+#custom-launcher:hover, #custom-media:hover {{ background: {rgba(accent, 0.18)}; }}
+#pulseaudio:hover, #network:hover, #custom-system:hover {{ color: {accent}; }}
+#pulseaudio.muted, #network.disconnected {{ color: {dim}; }}
+tooltip {{ background: {bg}; color: {fg}; border-color: {rgba(accent, 0.35)}; }}
+"""
+
+def style_text():
+    base = (ROOT / 'style.css').read_text()
+    if pywal_enabled() and palette is not None:
+        data = palette.load()
+        if data:
+            base += palette_overrides(data)
+    return base
+
+def palette_stamp():
+    watched = []
+    for path in (config_path(), palette.wal_path() if palette else None):
+        try:
+            watched.append(path.stat().st_mtime_ns if path else None)
+        except OSError:
+            watched.append(None)
+    return tuple(watched)
+
 def supervise():
     children = {}
     running = True
@@ -81,37 +146,57 @@ def supervise():
     signal.signal(signal.SIGINT, stop)
     with tempfile.TemporaryDirectory(prefix='rusted-bar-', dir=os.environ.get('XDG_RUNTIME_DIR')) as tmp:
         last_state = None
+        styles = None
         try:
             while running:
                 try: outputs = json.loads(ctl('outputs-json'))
                 except (OSError, ValueError): outputs = []
                 desired = {o['name']: o for o in outputs}
-                for name, (proc, size, _) in list(children.items()):
+                for name, (proc, size, _, _) in list(children.items()):
                     o = desired.get(name)
                     if not o or size != (o['width'], o['scale']) or proc.poll() is not None:
                         if proc.poll() is None: proc.terminate(); proc.wait(timeout=4)
                         del children[name]
                 for name, o in desired.items():
                     if name in children: continue
-                    path = Path(tmp) / (str(len(children)) + '.json')
+                    index = str(len(children))
+                    path = Path(tmp) / (index + '.json')
                     path.write_text(json.dumps(config(o)))
-                    proc = subprocess.Popen(['waybar', '-c', str(path), '-s', str(ROOT / 'style.css')], env=os.environ | {'GDK_BACKEND': 'wayland'})
-                    children[name] = (proc, (o['width'], o['scale']), time.monotonic())
+                    css = Path(tmp) / (index + '.css')
+                    css.write_text(style_text())
+                    proc = subprocess.Popen(['waybar', '-c', str(path), '-s', str(css)], env=os.environ | {'GDK_BACKEND': 'wayland'})
+                    children[name] = (proc, (o['width'], o['scale']), time.monotonic(), css)
                 # The workspace pills listen on SIGRTMIN+8; poke them as soon as anything changes
                 # instead of waiting for Waybar's own (slow) module timer. A fresh bar needs a
                 # moment before it has installed its handlers, so give it a second.
                 state = json.dumps([[o['name'], [[w['number'], w['active'], w['windows']] for w in o['workspaces']]] for o in outputs])
                 if state != last_state:
                     last_state = state
-                    for proc, _, started in children.values():
+                    for proc, _, started, _ in children.values():
                         if time.monotonic() - started < 1.0 or proc.poll() is not None: continue
                         try: proc.send_signal(signal.SIGRTMIN + 8)
                         except OSError: pass
+                # A new wallpaper palette (or the pywal toggle) reloads every bar's stylesheet.
+                stamp = palette_stamp()
+                if stamp != styles:
+                    text = style_text()
+                    pending = False
+                    for proc, _, started, css in children.values():
+                        if proc.poll() is not None: continue
+                        Path(css).write_text(text)
+                        if time.monotonic() - started < 1.0:
+                            # Too fresh for signal handlers: leave the stamp alone so we retry.
+                            pending = True
+                            continue
+                        try: proc.send_signal(signal.SIGUSR2)
+                        except OSError: pass
+                    if not pending:
+                        styles = stamp
                 time.sleep(0.1)
         finally:
-            for proc, _, _ in children.values():
+            for proc, _, _, _ in children.values():
                 if proc.poll() is None: proc.terminate()
-            for proc, _, _ in children.values():
+            for proc, _, _, _ in children.values():
                 try: proc.wait(timeout=4)
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
 

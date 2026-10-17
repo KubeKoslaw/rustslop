@@ -37,6 +37,9 @@ Restore refuses to overwrite files that changed since installation; move those a
 - Waybar is started by `waybar.py supervise`, one bar per monitor; workspace clicks switch that monitor only.
 - `wallpaper.py` keeps swaybg in sync with the `[wallpaper]` config section, so the settings app's Wallpaper
   page (file picker or thumbnail gallery) applies a new image without restarting the session.
+- `palette.py` derives a pywal-compatible palette (`~/.cache/wal/colors.json`) from the wallpaper, using
+  `wal` when installed and a Pillow extractor otherwise. Switch pywal on in Settings → Theme; `wallpaper.py`
+  regenerates the palette whenever the wallpaper changes and the compositor/Waybar follow it live.
 - `fastfetch/config.jsonc` + `logo.txt` are themed to match and `fastfetch.bash` shows them once in every
   interactive foot shell. The installer sources that snippet from `~/.bashrc` (marker-guarded, backed up,
   `--no-bashrc` opts out); other terminals and non-interactive shells are unaffected.

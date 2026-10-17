@@ -16,6 +16,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("apps", "Default apps"),
     ("input", "Input"),
     ("colors", "Colors"),
+    ("theme", "Theme"),
     ("wallpaper", "Wallpaper"),
     ("appearance", "Appearance"),
     ("audio", "Audio"),
@@ -356,8 +357,152 @@ fn settings_page(ctx: &Shared, section: &str, title: &str) -> gtk::ScrolledWindo
     let (outer, body) = page(title);
     let settings: Vec<Value> = ctx.schema["settings"].as_array().cloned().unwrap_or_default();
     for s in settings.iter().filter(|s| s["section"] == section) {
+        if section == "colors" && s["key"].as_str().is_some_and(|key| key.starts_with("pywal")) {
+            continue;
+        }
         body.append(&setting_row(ctx, s));
         body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    }
+    scrolled(&outer)
+}
+
+/// pywal's palette file, used by the compositor, Waybar and the Theme page.
+fn wal_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("RUSTED_WAL_FILE") {
+        return path.into();
+    }
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".cache/wal/colors.json")
+}
+
+/// The rice's palette generator (falls back to none when the rice is not installed).
+fn palette_script() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("RUSTED_PALETTE") {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    let path = base.join("rusted-rice/palette.py");
+    path.is_file().then_some(path)
+}
+
+fn current_palette() -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(wal_path()).ok()?).ok()
+}
+
+fn hex_rgb(hex: &str) -> Option<(f64, f64, f64)> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() < 6 {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|v| v as f64 / 255.0);
+    Some((channel(0)?, channel(2)?, channel(4)?))
+}
+
+fn swatch(hex: &str, name: &str) -> gtk::Box {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(34);
+    area.set_content_height(34);
+    let color = hex_rgb(hex).unwrap_or((0.5, 0.5, 0.5));
+    area.set_draw_func(move |_, context, width, height| {
+        context.set_source_rgb(color.0, color.1, color.2);
+        context.rectangle(0.0, 0.0, width as f64, height as f64);
+        let _ = context.fill();
+    });
+    let cell = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(4).build();
+    cell.append(&area);
+    let text = label(hex, &["monospace", "caption"]);
+    text.set_tooltip_text(Some(&format!("{name} {hex}")));
+    cell.append(&text);
+    cell.set_tooltip_text(Some(&format!("{name} {hex}")));
+    cell
+}
+
+fn theme_page(ctx: &Shared) -> gtk::ScrolledWindow {
+    let (outer, body) = page("Theme");
+    body.append(&label(
+        "The compositor, Waybar and this app follow the palette in ~/.cache/wal/colors.json. With pywal on, \
+         the palette is derived from the current wallpaper (the rice's wallpaper helper regenerates it whenever \
+         the wallpaper changes).",
+        &["dim-label"],
+    ));
+    let settings: Vec<Value> = ctx.schema["settings"].as_array().cloned().unwrap_or_default();
+    for entry in settings.iter().filter(|s| s["section"] == "colors") {
+        if !entry["key"].as_str().is_some_and(|key| key.starts_with("pywal")) {
+            continue;
+        }
+        body.append(&setting_row(ctx, entry));
+        body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    }
+
+    let generate = gtk::Button::with_label("Regenerate palette from the current wallpaper");
+    generate.add_css_class("suggested-action");
+    generate.set_halign(gtk::Align::Start);
+    match palette_script() {
+        Some(script) => {
+            let ctx = ctx.clone();
+            generate.connect_clicked(move |_| {
+                let (ctx, script) = (ctx.clone(), script.clone());
+                glib::spawn_future_local(async move {
+                    let result = gio::spawn_blocking(move || {
+                        Command::new("python3").arg(&script).arg("generate").output()
+                    })
+                    .await;
+                    match result {
+                        Ok(Ok(out)) if out.status.success() => {
+                            reload_dump(&ctx);
+                            rebuild_all(&ctx);
+                            set_status(&ctx, "Palette regenerated from the current wallpaper", false);
+                        }
+                        Ok(Ok(out)) => {
+                            let error = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                            set_status(&ctx, &format!("palette: {}", if error.is_empty() { "failed".into() } else { error }), true);
+                        }
+                        Ok(Err(error)) => set_status(&ctx, &format!("cannot run palette.py: {error}"), true),
+                        Err(error) => set_status(&ctx, &format!("palette task failed: {error:?}"), true),
+                    }
+                });
+            });
+        }
+        None => {
+            generate.set_sensitive(false);
+            generate.set_tooltip_text(Some("palette.py not found — run contrib/rice/install.py"));
+        }
+    }
+    body.append(&generate);
+
+    body.append(&label("Current palette", &["heading"]));
+    match current_palette() {
+        Some(palette) => {
+            let flow = gtk::FlowBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .max_children_per_line(9)
+                .min_children_per_line(2)
+                .column_spacing(12)
+                .row_spacing(8)
+                .build();
+            let mut entries: Vec<(String, String)> = Vec::new();
+            for (name, value) in palette["special"].as_object().into_iter().flatten() {
+                if let Some(hex) = value.as_str() {
+                    entries.push((name.clone(), hex.to_string()));
+                }
+            }
+            for index in 0..16 {
+                let key = format!("color{index}");
+                if let Some(hex) = palette["colors"][&key].as_str() {
+                    entries.push((key, hex.to_string()));
+                }
+            }
+            for (name, hex) in entries {
+                flow.append(&swatch(&hex, &name));
+            }
+            body.append(&flow);
+        }
+        None => body.append(&label(
+            "No palette yet — enable pywal and press the button, or pick a wallpaper first.",
+            &["dim-label"],
+        )),
     }
     scrolled(&outer)
 }
@@ -743,7 +888,11 @@ fn rebuild_all(ctx: &Shared) {
         ctx.stack.remove(&child);
     }
     for (section, title) in SECTIONS {
-        let page = if *section == "wallpaper" { wallpaper_page(ctx) } else { settings_page(ctx, section, title) };
+        let page = match *section {
+            "wallpaper" => wallpaper_page(ctx),
+            "theme" => theme_page(ctx),
+            _ => settings_page(ctx, section, title),
+        };
         ctx.stack.add_titled(&page, Some(section), title);
     }
     ctx.stack.add_titled(&scrolled(&keybinds_page(ctx)), Some("keybinds"), "Keybinds");
