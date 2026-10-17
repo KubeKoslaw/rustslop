@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use smithay::{
     backend::renderer::Color32F,
     input::keyboard::{xkb, ModifiersState},
@@ -14,7 +14,7 @@ use smithay::{
 
 use crate::input::Action;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct General {
     pub gap: i32,
@@ -25,30 +25,143 @@ pub struct General {
     /// "alt", "super", or "auto" (default): Super on a real session, Alt when nested in another
     /// desktop (which usually keeps Super for itself).
     pub modifier: String,
+    /// Output scale, may be fractional (e.g. 1.5). Clamped to 0.5-4.
+    pub scale: f64,
+    /// Start Xwayland (if installed) so X11 apps work.
+    pub xwayland: bool,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into() }
+        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into(), scale: 1.0, xwayland: true }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Colors {
     pub focused: String,
     pub unfocused: String,
     pub background: String,
+    /// Take the three colours from pywal's `colors.json` instead (the ones above are then the
+    /// fallback when the file is missing). Follows `wal -i ...` live.
+    pub pywal: bool,
+    /// Which pywal colour to use: `background`, `foreground`, `cursor` or `color0`..`color15`.
+    pub pywal_focused: String,
+    pub pywal_unfocused: String,
+    pub pywal_background: String,
 }
 
 impl Default for Colors {
     fn default() -> Self {
-        Self { focused: "#73a6ff".into(), unfocused: "#40455a".into(), background: "#14141f".into() }
+        Self {
+            focused: "#73a6ff".into(),
+            unfocused: "#40455a".into(),
+            background: "#14141f".into(),
+            pywal: false,
+            pywal_focused: "color4".into(),
+            pywal_unfocused: "color8".into(),
+            pywal_background: "background".into(),
+        }
+    }
+}
+
+/// Per-output overrides, keyed by connector name (`DP-1`, `HDMI-A-1`, ...).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct OutputSettings {
+    /// `"1920x1080"` or `"1920x1080@75"`; empty means the monitor's preferred mode.
+    pub mode: String,
+    /// Logical position `"X,Y"` (`"1920,0"` puts this monitor to the right of a 1920-wide one).
+    /// Empty means "to the right of the configured outputs, in connector order".
+    pub position: String,
+}
+
+/// Desktop wallpaper, applied by the session's wallpaper helper (a local rice script, not tracked).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Wallpaper {
+    /// Image file; empty keeps the solid `[colors] background`.
+    pub path: String,
+    /// swaybg mode: `fill`, `fit`, `stretch`, `center` or `tile`.
+    pub mode: String,
+}
+
+impl Default for Wallpaper {
+    fn default() -> Self {
+        Self { path: String::new(), mode: "fill".into() }
+    }
+}
+
+pub const WALLPAPER_MODES: &[&str] = &["fill", "fit", "stretch", "center", "tile"];
+
+/// Parse a `"X,Y"` logical position used by `[outputs.NAME]`.
+pub fn parse_output_position(s: &str) -> Result<(i32, i32), String> {
+    let (x, y) = s.split_once(',').ok_or_else(|| "expected \"X,Y\" in logical pixels".to_string())?;
+    let x: i32 = x.trim().parse().map_err(|_| "X is not a number".to_string())?;
+    let y: i32 = y.trim().parse().map_err(|_| "Y is not a number".to_string())?;
+    if !(-32768..=32767).contains(&x) || !(-32768..=32767).contains(&y) {
+        return Err("position is outside -32768..32767".into());
+    }
+    Ok((x, y))
+}
+
+/// Parse `WIDTHxHEIGHT` or `WIDTHxHEIGHT@REFRESH` (refresh may be fractional, e.g. `59.94`).
+pub fn parse_output_mode(s: &str) -> Result<(i32, i32, Option<f64>), String> {
+    let (size, refresh) = match s.split_once('@') {
+        Some((size, hz)) => {
+            let hz = hz.trim().parse::<f64>().map_err(|_| "refresh rate is not a number".to_string())?;
+            if !(1.0..=500.0).contains(&hz) {
+                return Err("refresh rate is outside 1-500 Hz".into());
+            }
+            (size, Some(hz))
+        }
+        None => (s, None),
+    };
+    let (w, h) = size.split_once('x').ok_or_else(|| "expected WIDTHxHEIGHT[@REFRESH]".to_string())?;
+    let w: i32 = w.trim().parse().map_err(|_| "width is not a number".to_string())?;
+    let h: i32 = h.trim().parse().map_err(|_| "height is not a number".to_string())?;
+    if !(1..=16384).contains(&w) || !(1..=16384).contains(&h) {
+        return Err("size is outside 1-16384".into());
+    }
+    Ok((w, h, refresh))
+}
+
+/// pywal's `~/.cache/wal/colors.json` (`$RUSTED_WAL_FILE` overrides the location).
+pub fn wal_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("RUSTED_WAL_FILE") {
+        return p.into();
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from(".cache"));
+    cache.join("wal").join("colors.json")
+}
+
+#[derive(Deserialize, Default)]
+struct WalFile {
+    #[serde(default)]
+    special: BTreeMap<String, String>,
+    #[serde(default)]
+    colors: BTreeMap<String, String>,
+}
+
+impl WalFile {
+    fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("colors.pywal is on but {} cannot be read ({e}); run `wal -i IMAGE` first. Using the configured colours", path.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("{} is not a pywal colors.json: {e}", path.display()))
+    }
+
+    /// A pywal colour by name: background/foreground/cursor or colorN.
+    fn get(&self, name: &str) -> Option<&String> {
+        self.special.get(name).or_else(|| self.colors.get(name))
     }
 }
 
 /// Keyboard layout and repeat. Needed on a real TTY, where there is no host compositor to ask.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Input {
     pub layout: String,
@@ -58,6 +171,8 @@ pub struct Input {
     pub repeat_rate: i32,
     pub tap_to_click: bool,
     pub natural_scroll: bool,
+    /// Natural scrolling for mice (wheel direction); touchpads use `natural_scroll`.
+    pub mouse_natural_scroll: bool,
 }
 
 impl Default for Input {
@@ -70,6 +185,109 @@ impl Default for Input {
             repeat_rate: 25,
             tap_to_click: true,
             natural_scroll: false,
+            mouse_natural_scroll: false,
+        }
+    }
+}
+
+/// Default programs, referenced from keybinds as `spawn:@launcher`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Apps {
+    /// Empty = use `general.terminal`.
+    pub terminal: String,
+    pub launcher: String,
+    pub browser: String,
+    pub file_manager: String,
+    pub lock: String,
+    pub settings: String,
+}
+
+impl Default for Apps {
+    fn default() -> Self {
+        Self {
+            terminal: String::new(),
+            launcher: "fuzzel".into(),
+            browser: "xdg-open https://".into(),
+            file_manager: "xdg-open .".into(),
+            lock: "swaylock -f -c 000000".into(),
+            settings: "rusted-settings".into(),
+        }
+    }
+}
+
+impl Apps {
+    /// Command for `@name`, with the terminal falling back to `general.terminal`.
+    fn resolve(&self, name: &str, general_terminal: &str) -> Option<String> {
+        Some(match name {
+            "terminal" if self.terminal.is_empty() => general_terminal.to_string(),
+            "terminal" => self.terminal.clone(),
+            "launcher" => self.launcher.clone(),
+            "browser" => self.browser.clone(),
+            "file_manager" => self.file_manager.clone(),
+            "lock" => self.lock.clone(),
+            "settings" => self.settings.clone(),
+            _ => return None,
+        })
+    }
+}
+
+/// Volume / mute actions (`volume-up`, `volume-down`, `volume-mute`, `mic-mute`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Audio {
+    /// Percent per key press.
+    pub step: u32,
+    /// Limit in percent; above 100 is software boost.
+    pub max_volume: u32,
+    /// Show a notification with the new level.
+    pub notify: bool,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Self { step: 5, max_volume: 100, notify: true }
+    }
+}
+
+/// Optional compositor effects. Defaults preserve the original rectangular appearance.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub corner_radius: i32,
+    pub shadow_enabled: bool,
+    pub shadow_size: i32,
+    pub shadow_opacity: f64,
+    pub blur_enabled: bool,
+    pub blur_radius: i32,
+    pub animations_enabled: bool,
+    pub animation_duration_ms: i32,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { corner_radius: 0, shadow_enabled: false, shadow_size: 24, shadow_opacity: 0.24,
+            blur_enabled: false, blur_radius: 8, animations_enabled: false, animation_duration_ms: 180 }
+    }
+}
+impl Appearance {
+    pub fn enabled(&self) -> bool {
+        self.corner_radius > 0 || self.shadow_enabled || self.blur_enabled || self.animations_enabled
+    }
+    fn validate(&mut self, problems: &mut Vec<String>) {
+        for (name, value, lo, hi) in [
+            ("corner_radius", &mut self.corner_radius, 0, 64),
+            ("shadow_size", &mut self.shadow_size, 0, 64),
+            ("blur_radius", &mut self.blur_radius, 1, 32),
+            ("animation_duration_ms", &mut self.animation_duration_ms, 0, 1000),
+        ] {
+            if !(lo..=hi).contains(value) {
+                problems.push(format!("appearance.{name} is outside {lo}-{hi}, clamped"));
+                *value = (*value).clamp(lo, hi);
+            }
+        }
+        if !(0.0..=1.0).contains(&self.shadow_opacity) {
+            problems.push("appearance.shadow_opacity must be finite and within 0-1, using 0.24".into());
+            self.shadow_opacity = 0.24;
         }
     }
 }
@@ -77,10 +295,16 @@ impl Default for Input {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct RawConfig {
+    appearance: Appearance,
+    audio: Audio,
+    apps: Apps,
     general: General,
     input: Input,
     colors: Colors,
     autostart: Vec<String>,
+    /// Per-connector overrides, e.g. `[outputs.DP-1] mode = "1920x1080@75"`.
+    outputs: BTreeMap<String, OutputSettings>,
+    wallpaper: Wallpaper,
     /// "mod+shift+1" = "move-to-workspace:1"; merged over the defaults, "none" removes a bind.
     keybinds: BTreeMap<String, String>,
 }
@@ -88,6 +312,8 @@ struct RawConfig {
 /// One parsed keybind.
 #[derive(Debug, Clone)]
 pub struct Binding {
+    /// As written in the config ("mod+shift+1"), for messages.
+    pub key: String,
     pub logo: bool,
     pub alt: bool,
     pub ctrl: bool,
@@ -105,12 +331,21 @@ impl Binding {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub appearance: Appearance,
     pub general: General,
+    pub audio: crate::audio::AudioSettings,
     pub input: Input,
     pub focused: Color32F,
     pub unfocused: Color32F,
     pub background: Color32F,
+    /// Set when the colours come from pywal: the file to watch for changes.
+    pub pywal_file: Option<PathBuf>,
     pub autostart: Vec<String>,
+    /// Per-output mode overrides, keyed by connector name.
+    pub outputs: BTreeMap<String, OutputSettings>,
+    /// Read by the session helper; parsed here so bad values are reported.
+    #[allow(dead_code)]
+    pub wallpaper: Wallpaper,
     pub bindings: Vec<Binding>,
 }
 
@@ -120,11 +355,16 @@ impl Default for Config {
     }
 }
 
-const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
+pub(crate) const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+return", "spawn"),
     ("mod+q", "close"),
     ("mod+tab", "focus-next"),
     ("mod+f", "toggle-floating"),
+    ("mod+d", "spawn:@launcher"),
+    ("mod+b", "spawn:@browser"),
+    ("mod+e", "spawn:@file_manager"),
+    ("mod+shift+x", "spawn:@lock"),
+    ("mod+s", "spawn:@settings"),
     ("mod+h", "focus-left"),
     ("mod+l", "focus-right"),
     ("mod+k", "focus-up"),
@@ -138,6 +378,15 @@ const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+shift+f", "toggle-fullscreen"),
     ("mod+shift+e", "quit"),
     ("mod+shift+r", "reload"),
+    // Media keys and keyboard knobs work without any config.
+    ("XF86AudioRaiseVolume", "volume-up"),
+    ("XF86AudioLowerVolume", "volume-down"),
+    ("XF86AudioMute", "volume-mute"),
+    ("XF86AudioMicMute", "mic-mute"),
+    ("XF86AudioPlay", "spawn:playerctl play-pause"),
+    ("XF86AudioPause", "spawn:playerctl pause"),
+    ("XF86AudioNext", "spawn:playerctl next"),
+    ("XF86AudioPrev", "spawn:playerctl previous"),
     ("mod+1", "workspace:1"),
     ("mod+2", "workspace:2"),
     ("mod+3", "workspace:3"),
@@ -181,9 +430,26 @@ impl Config {
     }
 
     pub fn parse(text: &str, real_session: bool) -> (Self, Vec<String>) {
+        // Unknown keys are reported (typos, keys in the wrong section) but never fatal.
+        let mut problems = match text.parse::<toml::Table>() {
+            Ok(table) => unknown_key_problems(&table),
+            Err(e) => return (Self::default(), vec![format!("config parse error: {e}")]),
+        };
         match toml::from_str::<RawConfig>(text) {
-            Ok(raw) => Self::from_raw(raw, real_session),
+            Ok(raw) => {
+                let (config, more) = Self::from_raw(raw, real_session);
+                problems.extend(more);
+                (config, problems)
+            }
             Err(e) => (Self::default(), vec![format!("config parse error: {e}")]),
+        }
+    }
+
+    /// Load a specific file (used by `--check-config`).
+    pub fn load_file(path: &std::path::Path, real_session: bool) -> (Self, Vec<String>) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse(&text, real_session),
+            Err(e) => (Self::default(), vec![format!("cannot read {}: {e}", path.display())]),
         }
     }
 
@@ -195,9 +461,29 @@ impl Config {
                 fallback
             })
         };
-        let focused = color("colors.focused", &raw.colors.focused, Color32F::new(0.45, 0.65, 1.0, 1.0));
-        let unfocused = color("colors.unfocused", &raw.colors.unfocused, Color32F::new(0.25, 0.27, 0.35, 1.0));
-        let background = color("colors.background", &raw.colors.background, Color32F::new(0.08, 0.08, 0.12, 1.0));
+        let mut focused = color("colors.focused", &raw.colors.focused, Color32F::new(0.45, 0.65, 1.0, 1.0));
+        let mut unfocused = color("colors.unfocused", &raw.colors.unfocused, Color32F::new(0.25, 0.27, 0.35, 1.0));
+        let mut background = color("colors.background", &raw.colors.background, Color32F::new(0.08, 0.08, 0.12, 1.0));
+
+        // pywal: its palette replaces the three colours (and is re-read when the file changes).
+        let mut pywal_file = None;
+        if raw.colors.pywal {
+            let path = wal_path();
+            match WalFile::load(&path) {
+                Ok(wal) => {
+                    let mut pick = |what: &str, wanted: &str, target: &mut Color32F| match wal.get(wanted).and_then(|h| parse_color(h)) {
+                        Some(c) => *target = c,
+                        None => problems.push(format!("colors.pywal_{what} = {wanted:?}: no such colour in {}", path.display())),
+                    };
+                    pick("focused", &raw.colors.pywal_focused, &mut focused);
+                    pick("unfocused", &raw.colors.pywal_unfocused, &mut unfocused);
+                    pick("background", &raw.colors.pywal_background, &mut background);
+                }
+                Err(e) => problems.push(e),
+            }
+            // Keep watching even when the file is missing now: `wal` may create it later.
+            pywal_file = Some(path);
+        }
 
         let super_mod = match raw.general.modifier.to_ascii_lowercase().as_str() {
             "super" | "logo" | "win" => true,
@@ -217,7 +503,7 @@ impl Config {
             if action == "none" {
                 continue;
             }
-            match (parse_binding(key, super_mod), parse_action(action, &raw.general.terminal)) {
+            match (parse_binding(key, super_mod), parse_action(action, &raw.apps, &raw.general.terminal)) {
                 (Ok(mut b), Ok(a)) => {
                     b.action = a;
                     bindings.push(b);
@@ -226,17 +512,178 @@ impl Config {
             }
         }
 
+        // Report values that get clamped instead of silently changing them.
+        let g = &raw.general;
+        if g.gap < 0 || g.border < 0 {
+            problems.push(format!("general.gap/border cannot be negative (gap = {}, border = {}), using 0", g.gap, g.border));
+        } else if g.border > g.gap {
+            problems.push(format!("general.border ({}) is larger than general.gap ({}): borders will overlap neighbouring windows", g.border, g.gap));
+        }
+        if !(crate::layout::MIN_RATIO..=crate::layout::MAX_RATIO).contains(&g.split_ratio) {
+            problems.push(format!(
+                "general.split_ratio {} is outside {}-{}, clamped",
+                g.split_ratio,
+                crate::layout::MIN_RATIO,
+                crate::layout::MAX_RATIO
+            ));
+        }
+        if !(0.5..=4.0).contains(&g.scale) {
+            problems.push(format!("general.scale {} is outside 0.5-4, clamped", g.scale));
+        }
+        if raw.input.repeat_delay <= 0 || raw.input.repeat_rate <= 0 {
+            problems.push(format!(
+                "input.repeat_delay/repeat_rate must be positive (got {}/{})",
+                raw.input.repeat_delay, raw.input.repeat_rate
+            ));
+        }
+        for (i, a) in raw.autostart.iter().enumerate() {
+            if a.trim().is_empty() {
+                problems.push(format!("autostart entry #{} is empty", i + 1));
+            }
+        }
+        for (i, b) in bindings.iter().enumerate() {
+            if let Some(first) = bindings[..i].iter().find(|o| (o.logo, o.alt, o.ctrl, o.shift, o.sym) == (b.logo, b.alt, b.ctrl, b.shift, b.sym)) {
+                problems.push(format!(
+                    "keybinds {:?} ({:?}) and {:?} ({:?}) are the same keys; the first one wins",
+                    first.key, first.action, b.key, b.action
+                ));
+            }
+        }
+
         let general = General {
             gap: raw.general.gap.max(0),
             border: raw.general.border.max(0),
             split_ratio: raw.general.split_ratio.clamp(crate::layout::MIN_RATIO, crate::layout::MAX_RATIO),
+            // The fractional-scale protocol speaks in 1/120ths.
+            scale: (raw.general.scale.clamp(0.5, 4.0) * 120.0).round() / 120.0,
             ..raw.general
         };
-        (Self { general, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
+        if raw.audio.step == 0 || raw.audio.step > 50 {
+            problems.push(format!("audio.step {} is outside 1-50, using 5", raw.audio.step));
+        }
+        if !(50..=150).contains(&raw.audio.max_volume) {
+            problems.push(format!("audio.max_volume {} is outside 50-150, using 100", raw.audio.max_volume));
+        }
+        let audio = crate::audio::AudioSettings {
+            step: if (1..=50).contains(&raw.audio.step) { raw.audio.step } else { 5 },
+            max_volume: if (50..=150).contains(&raw.audio.max_volume) { raw.audio.max_volume } else { 100 },
+            notify: raw.audio.notify,
+        };
+        let mut appearance = raw.appearance;
+        appearance.validate(&mut problems);
+        let mut outputs = raw.outputs;
+        for (name, settings) in outputs.iter_mut() {
+            if !settings.mode.trim().is_empty() {
+                if let Err(e) = parse_output_mode(&settings.mode) {
+                    problems.push(format!("outputs.{name}.mode = {:?}: {e}; using the preferred mode", settings.mode));
+                    settings.mode.clear();
+                }
+            }
+            if !settings.position.trim().is_empty() {
+                if let Err(e) = parse_output_position(&settings.position) {
+                    problems.push(format!("outputs.{name}.position = {:?}: {e}; laying it out automatically", settings.position));
+                    settings.position.clear();
+                }
+            }
+        }
+        let mut wallpaper = raw.wallpaper;
+        if !WALLPAPER_MODES.contains(&wallpaper.mode.as_str()) {
+            problems.push(format!(
+                "wallpaper.mode {:?} is not one of {}; using fill",
+                wallpaper.mode,
+                WALLPAPER_MODES.join(", ")
+            ));
+            wallpaper.mode = "fill".into();
+        }
+        (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, outputs, wallpaper, bindings }, problems)
     }
 }
 
-fn parse_color(s: &str) -> Option<Color32F> {
+/// Which keys exist comes from `schema::SETTINGS` (a unit test keeps it in sync with the structs).
+
+
+/// Closest candidate to `name` (a likely typo), if any is close enough.
+fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    fn distance(a: &str, b: &str) -> usize {
+        let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+        let mut prev: Vec<usize> = (0..=b.len()).collect();
+        for (i, ca) in a.iter().enumerate() {
+            let mut cur = vec![i + 1];
+            for (j, cb) in b.iter().enumerate() {
+                cur.push((prev[j] + usize::from(ca != cb)).min(prev[j + 1] + 1).min(cur[j] + 1));
+            }
+            prev = cur;
+        }
+        prev[b.len()]
+    }
+    candidates
+        .iter()
+        .map(|c| (distance(&name.to_ascii_lowercase(), c), *c))
+        .filter(|(d, c)| *d < c.len() && *d <= 2.max(c.len() / 2))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c)
+}
+
+/// Report every key the parser would silently ignore.
+fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
+    use crate::schema::{keys_of, SECTIONS, SETTINGS};
+    let mut problems = Vec::new();
+    let top = keys_of("");
+    // Where a known key really lives, to say so when it is in the wrong place.
+    let home = |key: &str| -> Option<String> {
+        if top.contains(&key) {
+            return Some("a top-level key (put it above the first [section])".into());
+        }
+        SETTINGS.iter().find(|x| x.key == key && !x.section.is_empty()).map(|x| format!("a [{}] key", x.section))
+    };
+
+    for (key, value) in table {
+        if key == "outputs" {
+            let Some(per_output) = value.as_table() else {
+                problems.push("`outputs` must be a table of [outputs.CONNECTOR] tables".into());
+                continue;
+            };
+            for (connector, settings) in per_output {
+                let Some(inner) = settings.as_table() else {
+                    problems.push(format!("[outputs.{connector}] must be a table"));
+                    continue;
+                };
+                for k in inner.keys().filter(|k| !matches!(k.as_str(), "mode" | "position")) {
+                    problems.push(format!("unknown key `{k}` in [outputs.{connector}]; only `mode` and `position` are supported"));
+                }
+            }
+            continue;
+        }
+        if !top.contains(&key.as_str()) {
+            let hint = match (home(key), suggest(key, &top)) {
+                (Some(h), _) => format!(" — it is {h}"),
+                (None, Some(s)) => format!(" — did you mean `{s}`?"),
+                (None, None) => String::new(),
+            };
+            problems.push(format!("unknown top-level key `{key}`{hint}; it is ignored"));
+            continue;
+        }
+        if !SECTIONS.contains(&key.as_str()) {
+            continue;
+        }
+        let keys = keys_of(key);
+        let Some(inner) = value.as_table() else {
+            problems.push(format!("`{key}` must be a [{key}] table"));
+            continue;
+        };
+        for k in inner.keys().filter(|k| !keys.contains(&k.as_str())) {
+            let hint = match (home(k), suggest(k, &keys)) {
+                (Some(h), _) => format!(" — it is {h}, not part of [{key}]"),
+                (None, Some(s)) => format!(" — did you mean `{s}`?"),
+                (None, None) => String::new(),
+            };
+            problems.push(format!("unknown key `{k}` in [{key}]{hint}; it is ignored"));
+        }
+    }
+    problems
+}
+
+pub(crate) fn parse_color(s: &str) -> Option<Color32F> {
     let h = s.strip_prefix('#')?;
     if !(h.len() == 6 || h.len() == 8) || !h.is_ascii() {
         return None;
@@ -245,8 +692,8 @@ fn parse_color(s: &str) -> Option<Color32F> {
     Some(Color32F::new(byte(0)?, byte(2)?, byte(4)?, if h.len() == 8 { byte(6)? } else { 1.0 }))
 }
 
-fn parse_binding(key: &str, super_mod: bool) -> Result<Binding, String> {
-    let mut b = Binding { logo: false, alt: false, ctrl: false, shift: false, sym: 0, action: Action::Quit };
+pub(crate) fn parse_binding(key: &str, super_mod: bool) -> Result<Binding, String> {
+    let mut b = Binding { key: key.to_string(), logo: false, alt: false, ctrl: false, shift: false, sym: 0, action: Action::Quit };
     let mut sym = None;
     for part in key.split('+').map(str::trim) {
         match part.to_ascii_lowercase().as_str() {
@@ -283,7 +730,7 @@ pub fn normalize_sym(raw: u32) -> u32 {
     }
 }
 
-fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
+pub(crate) fn parse_action(s: &str, apps: &Apps, terminal: &str) -> Result<Action, String> {
     let (name, arg) = match s.split_once(':') {
         Some((n, a)) => (n.trim(), Some(a.trim())),
         None => (s.trim(), None),
@@ -295,7 +742,18 @@ fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
         }
     };
     Ok(match name {
-        "spawn" => Action::Exec(arg.unwrap_or(terminal).to_string()),
+        "spawn" => Action::Exec(match arg {
+            None => apps.resolve("terminal", terminal).unwrap_or_default(),
+            // `@launcher`, or `@terminal -e htop`: a default program, optionally with arguments.
+            Some(a) if a.starts_with('@') => {
+                let (name, rest) = a[1..].split_once(' ').unwrap_or((&a[1..], ""));
+                let base = apps.resolve(name, terminal).ok_or_else(|| {
+                    format!("unknown app @{name} (use @terminal, @launcher, @browser, @file_manager, @lock or @settings)")
+                })?;
+                if rest.is_empty() { base } else { format!("{base} {rest}") }
+            }
+            Some(a) => a.to_string(),
+        }),
         "close" => Action::Close,
         "focus-next" => Action::FocusNext,
         "focus-left" => Action::FocusDir(-1, 0),
@@ -308,6 +766,14 @@ fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
         "swap-right" => Action::SwapDir(1, 0),
         "swap-up" => Action::SwapDir(0, -1),
         "swap-down" => Action::SwapDir(0, 1),
+        "move-to-output-left" => Action::MoveToOutput(-1, 0),
+        "move-to-output-right" => Action::MoveToOutput(1, 0),
+        "move-to-output-up" => Action::MoveToOutput(0, -1),
+        "move-to-output-down" => Action::MoveToOutput(0, 1),
+        "volume-up" => Action::Audio(crate::audio::AudioCmd::VolumeUp),
+        "volume-down" => Action::Audio(crate::audio::AudioCmd::VolumeDown),
+        "volume-mute" => Action::Audio(crate::audio::AudioCmd::VolumeMute),
+        "mic-mute" => Action::Audio(crate::audio::AudioCmd::MicMute),
         "grow" => Action::Resize(0.05),
         "shrink" => Action::Resize(-0.05),
         "workspace" => Action::Workspace(ws(arg)?),
@@ -328,6 +794,180 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(c.bindings.len(), DEFAULT_KEYBINDS.len());
         assert_eq!(c.general.gap, 12);
+    }
+
+    #[test]
+    fn output_modes_parse_and_validate() {
+        assert_eq!(parse_output_mode("1920x1080"), Ok((1920, 1080, None)));
+        assert_eq!(parse_output_mode("1920x1080@75"), Ok((1920, 1080, Some(75.0))));
+        assert_eq!(parse_output_mode("2560x1440 @ 59.94"), Ok((2560, 1440, Some(59.94))));
+        for bad in ["1920", "1920x", "x1080", "1920x1080@0", "1920x1080@fast", "0x1080"] {
+            assert!(parse_output_mode(bad).is_err(), "{bad} should be rejected");
+        }
+        let (config, problems) = Config::parse(
+            "[outputs.DP-1]\nmode = \"1920x1080@75\"\n[outputs.HDMI-A-1]\nmode = \"1920x0\"",
+            false,
+        );
+        assert_eq!(config.outputs["DP-1"].mode, "1920x1080@75");
+        assert!(config.outputs["HDMI-A-1"].mode.is_empty(), "invalid mode is dropped");
+        assert!(problems.iter().any(|p| p.contains("outputs.HDMI-A-1.mode")), "{problems:?}");
+        let (_, problems) = Config::parse("[outputs.DP-1]\nmodel = \"x\"", false);
+        assert!(problems.iter().any(|p| p.contains("only `mode` and `position`")), "{problems:?}");
+
+        assert_eq!(parse_output_position("1920,0"), Ok((1920, 0)));
+        assert_eq!(parse_output_position("-1920, 120"), Ok((-1920, 120)));
+        for bad in ["1920", "a,0", "0,b"] {
+            assert!(parse_output_position(bad).is_err(), "{bad} should be rejected");
+        }
+        let (config, problems) = Config::parse(
+            "[outputs.DP-1]\nposition = \"1920,0\"\n[outputs.DP-3]\nposition = \"left\"",
+            false,
+        );
+        assert_eq!(config.outputs["DP-1"].position, "1920,0");
+        assert!(config.outputs["DP-3"].position.is_empty());
+        assert!(problems.iter().any(|p| p.contains("outputs.DP-3.position")), "{problems:?}");
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_with_hints() {
+        let (_, p) = Config::parse("[general]\ngapp = 3\nautostart = [\"x\"]\n[keybinding]\n\"mod+q\" = \"close\"", false);
+        let all = p.join("\n");
+        assert!(all.contains("unknown key `gapp` in [general] — did you mean `gap`?"), "{all}");
+        assert!(all.contains("unknown key `autostart` in [general] — it is a top-level key"), "{all}");
+        assert!(all.contains("unknown top-level key `keybinding` — did you mean `keybinds`?"), "{all}");
+        // The valid parts of a config with unknown keys still apply.
+        let (c, _) = Config::parse("[general]\ngap = 7\nbogus = 1", false);
+        assert_eq!(c.general.gap, 7);
+    }
+
+    #[test]
+    fn out_of_range_values_and_conflicts_are_reported() {
+        let (_, p) = Config::parse(
+            "[general]\ngap = -1\nscale = 9\nsplit_ratio = 0.99\n[keybinds]\n\"mod+x\" = \"close\"\n\"mod+X\" = \"quit\"",
+            false,
+        );
+        let all = p.join("\n");
+        assert!(all.contains("cannot be negative"), "{all}");
+        assert!(all.contains("general.scale 9"), "{all}");
+        assert!(all.contains("split_ratio"), "{all}");
+        assert!(all.contains("are the same keys"), "{all}");
+    }
+
+    #[test]
+    fn key_lists_match_the_example_config() {
+        let example = include_str!("../config.example.toml");
+        for x in crate::schema::SETTINGS {
+            let documented = example.contains(&format!("{} =", x.key)) || example.contains(&format!("[{}]", x.key));
+            assert!(documented, "config.example.toml does not document `{}`", x.key);
+        }
+        // And the example produces no unknown-key complaints.
+        let table: toml::Table = example.parse().unwrap();
+        assert!(unknown_key_problems(&table).is_empty());
+    }
+
+    #[test]
+    fn schema_matches_config_structs() {
+        use crate::schema::{keys_of, SETTINGS};
+        let sections: [(&str, toml::Value); 7] = [
+            ("appearance", toml::Value::try_from(Appearance::default()).unwrap()),
+            ("general", toml::Value::try_from(General::default()).unwrap()),
+            ("apps", toml::Value::try_from(Apps::default()).unwrap()),
+            ("input", toml::Value::try_from(Input::default()).unwrap()),
+            ("colors", toml::Value::try_from(Colors::default()).unwrap()),
+            ("wallpaper", toml::Value::try_from(Wallpaper::default()).unwrap()),
+            ("audio", toml::Value::try_from(Audio::default()).unwrap()),
+        ];
+        for (name, value) in &sections {
+            let table = value.as_table().unwrap();
+            let mut have: Vec<&str> = table.keys().map(String::as_str).collect();
+            let mut schema = keys_of(name);
+            have.sort();
+            schema.sort();
+            assert_eq!(have, schema, "schema and struct disagree about [{name}]");
+            for x in SETTINGS.iter().filter(|x| x.section == *name) {
+                let expected = format!("v = {}", x.default).parse::<toml::Table>().unwrap().remove("v").unwrap();
+                assert_eq!(table[x.key], expected, "default of {name}.{} differs from the schema", x.key);
+                // And the schema default is accepted without complaints.
+                let (_, problems) = Config::parse(&format!("[{name}]\n{} = {}", x.key, x.default), false);
+                assert!(problems.is_empty(), "{name}.{}: {problems:?}", x.key);
+            }
+        }
+        let json = crate::schema::to_json();
+        assert!(json.starts_with("{\"version\":1") && json.contains("\"key\":\"scale\""));
+    }
+
+    #[test]
+    fn every_listed_action_parses() {
+        for (name, arg) in crate::schema::ACTIONS {
+            let text = match *arg {
+                "N" => format!("{name}:1"),
+                "CMD" => format!("{name}:echo hi"),
+                _ => name.to_string(),
+            };
+            parse_action(&text, &Apps::default(), "foot").unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+    }
+
+    #[test]
+    fn apps_are_referenced_with_at_names() {
+        let text = "[general]\nterminal = \"foot\"\n[apps]\nlauncher = \"wofi --show drun\"\n[keybinds]\n\"mod+x\" = \"spawn:@launcher\"\n\"mod+y\" = \"spawn:@terminal -e htop\"\n\"mod+z\" = \"spawn:@nope\"";
+        let (c, p) = Config::parse(text, false);
+        let exec = |key: &str| {
+            let b = c.bindings.iter().find(|b| b.key == key).unwrap_or_else(|| panic!("no bind {key}"));
+            match &b.action {
+                Action::Exec(cmd) => cmd.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(exec("mod+x"), "wofi --show drun");
+        assert_eq!(exec("mod+y"), "foot -e htop");
+        assert!(p.iter().any(|m| m.contains("unknown app @nope")), "{p:?}");
+        // The default launcher bind follows the [apps] choice, too.
+        let (c2, _) = Config::parse("[apps]\nlauncher = \"rofi -show drun\"", false);
+        let d = c2.bindings.iter().find(|b| b.key == "mod+d").unwrap();
+        assert!(matches!(&d.action, Action::Exec(cmd) if cmd == "rofi -show drun"));
+    }
+
+    #[test]
+    fn pywal_palette_replaces_the_colours() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("colors.json");
+        std::fs::write(
+            &file,
+            r##"{"wallpaper":"x.png","alpha":"100","special":{"background":"#0a0b0c","foreground":"#eeeeee","cursor":"#ffffff"},
+                "colors":{"color2":"#00ff00","color4":"#112233","color8":"#445566"}}"##,
+        )
+        .unwrap();
+        // Only this test sets the variable; every other test leaves pywal off and never reads it.
+        unsafe { std::env::set_var("RUSTED_WAL_FILE", &file) };
+        let rgb = |c: Color32F| ((c.r() * 255.0).round() as u8, (c.g() * 255.0).round() as u8, (c.b() * 255.0).round() as u8);
+
+        let (c, p) = Config::parse("[colors]\npywal = true", false);
+        assert!(p.is_empty(), "{p:?}");
+        assert_eq!(rgb(c.focused), (0x11, 0x22, 0x33));
+        assert_eq!(rgb(c.unfocused), (0x44, 0x55, 0x66));
+        assert_eq!(rgb(c.background), (0x0a, 0x0b, 0x0c));
+        assert_eq!(c.pywal_file.as_deref(), Some(file.as_path()));
+
+        // Choosing other pywal colours, and a name pywal does not have.
+        let (c, p) = Config::parse("[colors]\npywal = true\npywal_focused = \"color2\"\npywal_unfocused = \"color99\"", false);
+        assert_eq!(rgb(c.focused), (0, 255, 0));
+        assert!(p.iter().any(|m| m.contains("pywal_unfocused") && m.contains("color99")), "{p:?}");
+        // The configured colour is the fallback for that one.
+        assert_eq!(rgb(c.unfocused), (0x40, 0x45, 0x5a));
+
+        // pywal off: the configured colours, and nothing to watch.
+        let (c, _) = Config::parse("", false);
+        assert_eq!(rgb(c.focused), (0x73, 0xa6, 0xff));
+        assert!(c.pywal_file.is_none());
+
+        // A missing file is reported, the configured colours stay, and the path is still watched.
+        std::fs::remove_file(&file).unwrap();
+        let (c, p) = Config::parse("[colors]\npywal = true", false);
+        assert!(p.iter().any(|m| m.contains("wal -i")), "{p:?}");
+        assert_eq!(rgb(c.focused), (0x73, 0xa6, 0xff));
+        assert!(c.pywal_file.is_some());
+        unsafe { std::env::remove_var("RUSTED_WAL_FILE") };
     }
 
     #[test]
@@ -356,7 +996,7 @@ mod tests {
     fn modifier_auto_follows_session_kind() {
         let ret = |real| {
             let (c, _) = Config::parse("", real);
-            let b = c.bindings.iter().find(|b| matches!(&b.action, Action::Exec(_))).unwrap();
+            let b = c.bindings.iter().find(|b| matches!(&b.action, Action::Exec(_)) && (b.logo || b.alt)).unwrap();
             (b.logo, b.alt)
         };
         assert_eq!(ret(false), (false, true)); // nested: Alt

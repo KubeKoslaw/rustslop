@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=rusted-wm Settings
+Comment=Keybinds, default apps, input, colors and more for rusted-wm
+Exec=rusted-settings
+Icon=preferences-system
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+Keywords=rusted;wm;compositor;keybinds;settings;

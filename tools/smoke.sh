@@ -4,20 +4,55 @@
 # Usage: tools/smoke.sh [outdir]     Exit code 0 = all checks passed. Screenshots land in outdir.
 set -u
 cd "$(dirname "$0")/.."
-OUT=${1:-${TMPDIR:-/tmp}/rusted-smoke}; mkdir -p "$OUT"
+OUT=${1:-${TMPDIR:-/tmp}/rusted-smoke}; mkdir -p "$OUT"; : > "$OUT/config.toml"
+# Own runtime dir: stray clients from other sessions (panels, leftover test runs) must never attach
+# to this compositor, and stale sockets from earlier runs cannot collide with it.
+RUNTIME_DIR=$(mktemp -d "$OUT/runtime.XXXXXX"); chmod 700 "$RUNTIME_DIR"; export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 CTL=tools/ctl.py
 pass=0; fail=0
 check() { # name, condition-exit-status
   if [ "$2" -eq 0 ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi
 }
-cleanup() { $CTL quit >/dev/null 2>&1; sleep 1; pkill -x rusted-wm 2>/dev/null; pkill -x konsole 2>/dev/null; pkill -x layer_client 2>/dev/null; }
+# SAFETY: only ever touch the compositor started by this script (its PID and its own socket), never
+# another rusted-wm that may be running on a real VT, and only terminals connected to that socket.
+WMPID=""; SOCK=""
+kill_test_terminals() {
+  [ -n "$SOCK" ] || return 0
+  for p in $(pgrep -x konsole); do
+    tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -qx "WAYLAND_DISPLAY=$SOCK" && kill $p
+  done
+}
+cleanup() {
+  [ -n "$SOCK" ] && $CTL quit >/dev/null 2>&1
+  sleep 1
+  [ -n "$WMPID" ] && kill "$WMPID" 2>/dev/null
+  kill_test_terminals
+  [ -n "${LAYERPID:-}" ] && kill "$LAYERPID" 2>/dev/null
+  [ -n "${RUNTIME_DIR:-}" ] && rm -rf "$RUNTIME_DIR"
+}
 trap cleanup EXIT
 
 cargo build -q --all-targets 2>&1 | tail -3
-pkill -x rusted-wm 2>/dev/null; sleep 1
-RUSTED_CONFIG=/nonexistent RUST_LOG=info ./target/debug/rusted-wm >"$OUT/wm.log" 2>&1 &
-sleep 3
-SOCK=$(ls "$XDG_RUNTIME_DIR" | grep -E '^rusted-[0-9]+$' | tail -1)
+# A fake pywal palette (colors.json format) for the pywal checks; pywal stays off until a check turns it on.
+mkdir -p "$OUT/wal"
+printf '{"special":{"background":"#0a0b0c","foreground":"#eeeeee","cursor":"#ffffff"},"colors":{"color2":"#00ff00","color4":"#112233","color8":"#445566"}}' > "$OUT/wal/colors.json"
+export RUSTED_WAL_FILE="$OUT/wal/colors.json"
+# Fake audio tools so the volume actions can be checked without touching real audio.
+mkdir -p "$OUT/fakebin"
+printf '#!/bin/sh\necho "$@" >> "%s/wpctl.log"\n[ "$1" = get-volume ] && echo "Volume: 0.55"\nexit 0\n' "$OUT" > "$OUT/fakebin/wpctl"
+printf '#!/bin/sh\necho "$@" >> "%s/notify.log"\n' "$OUT" > "$OUT/fakebin/notify-send"
+chmod +x "$OUT/fakebin/wpctl" "$OUT/fakebin/notify-send"; rm -f "$OUT/wpctl.log" "$OUT/notify.log"
+export PATH="$OUT/fakebin:$PATH"
+RUSTED_CONFIG="$OUT/config.toml" RUST_LOG=info ./target/debug/rusted-wm ${RUSTED_BACKEND---headless} >"$OUT/wm.log" 2>&1 &
+WMPID=$!
+for _ in $(seq 1 50); do
+  SOCK=$(grep -o 'WAYLAND_DISPLAY=rusted-[0-9]*' "$OUT/wm.log" | head -1 | cut -d= -f2)
+  [ -n "$SOCK" ] && break
+  sleep 0.2
+done
+[ -n "$SOCK" ] || { echo "compositor did not start, see $OUT/wm.log"; exit 1; }
+CTL="tools/ctl.py -s $SOCK"
+sleep 2
 n_windows() { $CTL info | grep -c "app_id="; }
 geo() { $CTL info | grep "app_id=" | sed 's/.*geo=//'; }
 
@@ -60,12 +95,157 @@ echo hello-clip | WAYLAND_DISPLAY=$SOCK timeout 3 wl-copy 2>/dev/null; sleep 1
 check "clipboard round trip" $([ "$(WAYLAND_DISPLAY=$SOCK timeout 3 wl-paste 2>/dev/null)" = hello-clip ]; echo $?)
 
 WAYLAND_DISPLAY=$SOCK ./target/debug/examples/layer_client top 40 >"$OUT/layer.log" 2>&1 &
-LPID=$!; sleep 2
+LPID=$!; LAYERPID=$LPID; sleep 2
 check "layer bar mapped" $(grep -q "bar mapped" "$OUT/layer.log"; echo $?)
 check "bar reserves 40px" $($CTL info | grep -q "geo=12,52"; echo $?)
 $CTL shot "$OUT/bar.png" >/dev/null
 kill $LPID 2>/dev/null; sleep 1
 check "area restored after bar exits" $($CTL info | grep -q "geo=12,12"; echo $?)
+
+# `rusted-wm config set` edits the file and the running compositor picks it up
+CFG="env RUSTED_CONFIG=$OUT/config.toml WAYLAND_DISPLAY=$SOCK ./target/debug/rusted-wm config"
+$CFG set general.gap 30 >"$OUT/cfgset.log" 2>&1
+check "config set reloads the running compositor (gap 30)" $(grep -q "compositor reloaded" "$OUT/cfgset.log" && $CTL info | grep -q "geo=30,30"; echo $?)
+check "config get reads it back" $([ "$($CFG get general.gap)" = 30 ]; echo $?)
+$CFG unset general.gap >/dev/null 2>&1
+check "config unset restores the default gap" $($CTL info | grep -q "geo=12,12"; echo $?)
+check "config set rejects an out-of-range value" $(! $CFG set general.gap 999 >/dev/null 2>&1; echo $?)
+
+W0=$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')
+printf '[general]\nscale = 2.0\n' > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
+check "scale 2 halves the logical output width" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = $((W0 / 2)) ]; echo $?)
+$CTL shot "$OUT/scaled.png" >/dev/null
+: > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
+check "scale restored" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = "$W0" ]; echo $?)
+printf '[general]\ngapp = 3\n' > "$OUT/config.toml"
+check "reload reports an unknown config key with a hint" $($CTL reload | grep -q "did you mean .gap."; echo $?)
+: > "$OUT/config.toml"; $CTL reload >/dev/null
+
+# ---- status helpers for bars ----
+check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)
+$CTL ws next >/dev/null; check "ws next goes to workspace 2" $($CTL info | grep -q "current_ws=2"; echo $?)
+$CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "current_ws=1"; echo $?)
+
+# ---- config tooling ----
+check "--dump-schema prints valid JSON with settings and actions" $(./target/debug/rusted-wm --dump-schema | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['settings'] and d['actions']"; echo $?)
+check "--check-config accepts the example config" $(./target/debug/rusted-wm --check-config config.example.toml >/dev/null; echo $?)
+printf '[general]\ngapp = 3\n' > "$OUT/bad.toml"
+check "--check-config fails on a config with problems" $(! ./target/debug/rusted-wm --check-config "$OUT/bad.toml" >/dev/null; echo $?)
+
+# ---- GUI settings app (only when it was built: cargo build --workspace) ----
+if [ -x target/debug/rusted-settings ]; then
+  WAYLAND_DISPLAY=$SOCK GDK_BACKEND=wayland GSK_RENDERER=cairo RUSTED_WM="$PWD/target/debug/rusted-wm" RUSTED_CONFIG="$OUT/config.toml" \
+    ./target/debug/rusted-settings >"$OUT/settings-gui.log" 2>&1 &
+  GUIPID=$!; sleep 4
+  check "settings GUI opens a window" $($CTL info | grep -q 'title="rusted-wm settings"'; echo $?)
+  $CTL shot "$OUT/settings-gui.png" >/dev/null
+  kill $GUIPID 2>/dev/null; sleep 1
+fi
+
+# ---- pywal colours ----
+colors_line() { $CTL info | grep '^colors '; }
+$CFG set colors.pywal true >/dev/null 2>&1
+check "pywal palette replaces the border and background colours" $(colors_line | grep -q "focused=#112233 unfocused=#445566 background=#0a0b0c pywal=true"; echo $?)
+sleep 1; printf '{"special":{"background":"#010203"},"colors":{"color4":"#aabbcc","color8":"#445566"}}' > "$OUT/wal/colors.json"; sleep 5
+check "a new pywal palette is picked up without a reload" $(colors_line | grep -q "focused=#aabbcc .*background=#010203"; echo $?)
+$CFG set colors.pywal_focused color8 >/dev/null 2>&1
+check "pywal_focused chooses another pywal colour" $(colors_line | grep -q "focused=#445566"; echo $?)
+$CFG unset colors.pywal_focused >/dev/null 2>&1; $CFG set colors.pywal false >/dev/null 2>&1
+check "pywal off restores the configured colours" $(colors_line | grep -q "focused=#73a6ff .*pywal=false"; echo $?)
+$CFG unset colors.pywal >/dev/null 2>&1
+
+# ---- audio actions (fake wpctl / notify-send) ----
+$CTL volume up >/dev/null; sleep 1
+check "volume up calls wpctl set-volume with the step" $(grep -q "set-volume -l 1.00 @DEFAULT_AUDIO_SINK@ 5%+" "$OUT/wpctl.log"; echo $?)
+check "volume up shows the new level" $(grep -q "Volume 55%" "$OUT/notify.log"; echo $?)
+$CTL volume down >/dev/null; $CTL volume mute >/dev/null; $CTL volume mic-mute >/dev/null; sleep 1
+check "volume down uses the negative step" $(grep -q "set-volume @DEFAULT_AUDIO_SINK@ 5%-" "$OUT/wpctl.log"; echo $?)
+check "mute toggles the sink" $(grep -q "set-mute @DEFAULT_AUDIO_SINK@ toggle" "$OUT/wpctl.log"; echo $?)
+check "mic-mute toggles the source" $(grep -q "set-mute @DEFAULT_AUDIO_SOURCE@ toggle" "$OUT/wpctl.log"; echo $?)
+
+# ---- wlr-screencopy (stand-in for grim) ----
+WAYLAND_DISPLAY=$SOCK timeout 20 ./target/debug/examples/screencopy_client "$OUT/copy.png" >"$OUT/copy.log" 2>&1
+check "screencopy of the whole output" $(grep -q "ready" "$OUT/copy.log"; echo $?)
+WAYLAND_DISPLAY=$SOCK timeout 20 ./target/debug/examples/screencopy_client "$OUT/copy-region.png" 100,50,300,200 >"$OUT/copy2.log" 2>&1
+check "screencopy of a 300x200 region" $(grep -q "buffer 300x200" "$OUT/copy2.log" && grep -q ready "$OUT/copy2.log"; echo $?)
+
+# ---- session lock (ext-session-lock test client stands in for swaylock) ----
+WAYLAND_DISPLAY=$SOCK ./target/debug/examples/lock_client 6 >"$OUT/lock.log" 2>&1 &
+LOCKPID=$!; sleep 3
+check "lock client locked the session" $(grep -q "lock surfaces mapped: 1" "$OUT/lock.log"; echo $?)
+check "info reports locked=true" $($CTL info | grep -q "^locked=true"; echo $?)
+check "no window has focus while locked" $([ "$($CTL info | grep 'app_id=' | grep -c 'focused=true')" = 0 ]; echo $?)
+check "screenshots are refused while locked" $($CTL shot "$OUT/locked.png" | grep -q "locked"; echo $?)
+$CTL focus h >/dev/null; $CTL float >/dev/null
+check "keybind actions do not run on the lock screen's windows" $([ "$($CTL info | grep 'app_id=' | grep -c 'focused=true')" = 0 ]; echo $?)
+wait $LOCKPID
+check "lock client unlocked" $(grep -q "^unlocked" "$OUT/lock.log"; echo $?)
+check "info reports locked=false" $($CTL info | grep -q "^locked=false"; echo $?)
+check "focus returns to a window after unlock" $([ "$($CTL info | grep 'app_id=' | grep -c 'focused=true')" = 1 ]; echo $?)
+
+# ---- Xwayland: a Qt app forced onto the X11 backend ----
+N0=$(n_windows)
+$CTL exec env QT_QPA_PLATFORM=xcb konsole >/dev/null; sleep 6
+check "X11 window is managed (Xwayland)" $([ "$(n_windows)" = $((N0 + 1)) ]; echo $?)
+check "X11 window is tiled and focused" $($CTL info | grep "focused=true" | grep -q "floating=false"; echo $?)
+$CTL close >/dev/null; sleep 3
+check "closing the X11 window removes it" $([ "$(n_windows)" = "$N0" ]; echo $?)
+
+# ---- multi-monitor (virtual second output, 800x600, placed to the right of the first) ----
+outputs_n() { $CTL info | grep -c '^output '; }
+$CTL output add 800 600 >/dev/null; sleep 1
+# each monitor has its own workspaces 1-9: cycling one monitor never touches the other
+$CTL output focus 1 >/dev/null
+for n in 1 2 3 4 1 2 3 4; do $CTL ws $n >/dev/null; done
+sleep 1
+check "workspace cycling on monitor 1 ends on 4 there" $($CTL info | grep '^output ' | sed -n 1p | grep -q "current_ws=4"; echo $?)
+check "monitor 2 keeps its own workspace (no swapping)" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)
+# per-monitor control: `ws N OUTPUT` / `ws next OUTPUT` act on that monitor (and focus it)
+$CTL ws 3 virtual-2 >/dev/null; sleep 1
+check "ws N OUTPUT switches the named monitor" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=3"; echo $?)
+check "...and leaves the other monitor alone" $($CTL info | grep '^output ' | sed -n 1p | grep -q "current_ws=4"; echo $?)
+$CTL ws next virtual-2 >/dev/null; sleep 1
+check "ws next OUTPUT moves that monitor on" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=4"; echo $?)
+check "ws-json OUTPUT reports that monitor's workspace" $($CTL ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
+check "rusted-wm ctl reaches the compositor (no Python needed)" $(WAYLAND_DISPLAY=$SOCK ./target/debug/rusted-wm ctl ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
+cat > "$OUT/waybar-template.jsonc" <<'JSON'
+// minimal template for the test; the real bar theme is local-only
+{
+  "output": "@OUTPUT@",
+  "modules-left": ["custom/ws1"],
+  "custom/ws1": { "exec": "rusted-wm ctl ws-json @OUTPUT@", "on-click": "rusted-wm ctl ws 1 @OUTPUT@" }
+}
+JSON
+RUSTED_WM="$PWD/target/debug/rusted-wm" contrib/rusted-waybar --config "$OUT/waybar-template.jsonc" --print HDMI-A-1 DP-1 > "$OUT/waybar-bars.json"
+check "rusted-waybar generates one bar per monitor with its name" $(python3 -c "import json; b=json.load(open('$OUT/waybar-bars.json')); assert [x['output'] for x in b]==['HDMI-A-1','DP-1'] and 'ws-json DP-1' in b[1]['custom/ws1']['exec'] and 'ws 1 DP-1' in b[1]['custom/ws1']['on-click'] and '@OUTPUT@' not in json.dumps(b)"; echo $?)
+$CTL ws 1 virtual-2 >/dev/null; $CTL output focus 1 >/dev/null; $CTL ws 1 >/dev/null
+check "second output appears at x=$W0" $($CTL info | grep '^output ' | sed -n 2p | grep -q "800x600 at $W0,0"; echo $?)
+check "second output starts on its own workspace 1" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)
+$CTL output focus 2 >/dev/null; $CTL spawn >/dev/null; sleep 3
+check "new window tiles on the focused (second) output" $($CTL info | grep -q "geo=$((W0 + 12)),12 776x576"; echo $?)
+$CTL focus h >/dev/null
+check "focus left at the monitor edge goes to the first output" $($CTL info | grep '^output ' | sed -n 1p | grep -q "focused=true"; echo $?)
+$CTL mvout l >/dev/null; sleep 1
+check "mvout moves the focused window to the second output's workspace" $($CTL info | grep -q "^ws 1@virtual-2 (visible): 2 window(s)"; echo $?)
+$CTL shot "$OUT/output2.png" 2 >/dev/null
+check "screenshot of output 2" $([ -s "$OUT/output2.png" ]; echo $?)
+$CTL output rm >/dev/null; sleep 1
+check "output removed" $([ "$(outputs_n)" = 1 ]; echo $?)
+$CTL output add 800 600 >/dev/null; $CTL output focus 2 >/dev/null; $CTL output rm >/dev/null; sleep 1
+check "removing the focused output returns focus to the first" $($CTL info | grep '^output ' | sed -n 1p | grep -q "focused=true"; echo $?)
+
+# a window dragged onto another monitor joins that monitor's workspace; mvout keeps focus on it
+focused_x() { $CTL info | grep 'app_id=' | grep 'focused=true' | sed 's/.*geo=\([0-9-]*\),.*/\1/'; }
+$CTL output add 800 600 >/dev/null; sleep 1; $CTL output focus 1 >/dev/null; $CTL spawn >/dev/null; sleep 4; $CTL float >/dev/null
+set -- $($CTL info | grep 'app_id=' | grep 'focused=true' | sed 's/.*geo=\([0-9-]*\),\([0-9-]*\) \([0-9]*\)x\([0-9]*\)/\1 \2 \3 \4/') 0 0 0 0
+$CTL drag move $(($1 + $3 / 2)) $(($2 + $4 / 2)) $((W0 + 300)) 300 >/dev/null
+check "dragging a floating window onto the second output keeps it there" $([ "$(focused_x)" -ge "$W0" ]; echo $?)
+$CTL float >/dev/null
+check "toggling floating works on the second output (window stays on it)" $([ "$(focused_x)" -ge "$W0" ]; echo $?)
+$CTL output focus 1 >/dev/null; $CTL spawn >/dev/null; sleep 4; $CTL mvout l >/dev/null; sleep 1
+check "mvout leaves the moved window focused on the second output" $([ "$(focused_x)" -ge "$W0" ]; echo $?)
+$CTL shot "$OUT/output2b.png" 2 >/dev/null
+$CTL output rm >/dev/null; sleep 1
 
 echo; echo "passed=$pass failed=$fail (outputs in $OUT)"
 [ "$fail" -eq 0 ]

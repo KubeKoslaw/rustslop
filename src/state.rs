@@ -2,19 +2,23 @@
 
 use std::os::unix::io::OwnedFd;
 
+use smithay::wayland::seat::WaylandFocus as _;
 use smithay::{
     backend::{renderer::utils::on_commit_buffer_handler, session::libseat::LibSeatSession},
-    delegate_compositor, delegate_data_control, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration,
+    delegate_compositor, delegate_cursor_shape, delegate_idle_inhibit, delegate_idle_notify, delegate_presentation,
+    delegate_session_lock, delegate_data_control, delegate_fractional_scale, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xwayland_shell, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
+    wayland::tablet_manager::TabletSeatHandler,
     output::Output,
     reexports::{
         wayland_protocols::xdg::{
             decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
             shell::server::xdg_toplevel,
         },
+        calloop::LoopHandle,
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
@@ -22,15 +26,17 @@ use smithay::{
         },
     },
     utils::Serial,
+    xwayland::{xwm::XwmId, X11Surface, X11Wm, XWaylandClientData},
     wayland::{
         buffer::BufferHandler,
-        compositor::{get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState},
+        compositor::{get_parent, with_states, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
         selection::{
             data_device::{
                 set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
                 ServerDndGrabHandler,
             },
+            SelectionSource, SelectionTarget,
             primary_selection::{set_primary_focus, PrimarySelectionHandler, PrimarySelectionState},
             wlr_data_control::{DataControlHandler, DataControlState},
             SelectionHandler,
@@ -46,15 +52,24 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         viewporter::ViewporterState,
+        idle_inhibit::IdleInhibitHandler,
+        idle_notify::{IdleNotifierHandler, IdleNotifierState},
+        presentation::PresentationState,
+        session_lock::{LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker},
+        xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
+        xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
+        cursor_shape::CursorShapeManagerState,
+        fractional_scale::{with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState},
     },
 };
 
 use crate::{
     config::Config,
-    wm::{Drag, Workspace},
+    wm::{Drag, Mon, Workspace},
 };
 
 pub struct State {
+    pub effects: crate::effects::Effects,
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -66,6 +81,28 @@ pub struct State {
     pub output_manager_state: OutputManagerState,
     #[allow(dead_code)] // keeps the viewporter global alive
     pub viewporter_state: ViewporterState,
+    #[allow(dead_code)] // keeps the cursor-shape global alive
+    pub cursor_shape_state: CursorShapeManagerState,
+    #[allow(dead_code)] // keeps the fractional-scale global alive
+    pub fractional_scale_state: FractionalScaleManagerState,
+    pub xdg_activation_state: XdgActivationState,
+    pub xwayland_shell_state: XWaylandShellState,
+    pub screencopy: crate::screencopy::ScreencopyState,
+    pub idle_notifier_state: IdleNotifierState<State>,
+    #[allow(dead_code)] // keeps the idle-inhibit global alive
+    pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Surfaces that asked to keep the screen awake (video players).
+    pub inhibitors: Vec<WlSurface>,
+    pub session_lock_state: SessionLockManagerState,
+    /// A session lock (swaylock) is active: only its surfaces are shown and get input.
+    pub locked: bool,
+    pub lock_surfaces: Vec<(Output, LockSurface)>,
+    #[allow(dead_code)] // keeps the presentation-time global alive
+    pub presentation_state: PresentationState,
+    pub clock: smithay::utils::Clock<smithay::utils::Monotonic>,
+    /// The X11 window manager, once Xwayland is up.
+    pub xwm: Option<X11Wm>,
+    pub loop_handle: LoopHandle<'static, State>,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
@@ -74,19 +111,23 @@ pub struct State {
     pub popups: PopupManager,
 
     pub space: Space<Window>,
+    /// `WORKSPACE_COUNT` workspaces per monitor slot (see `Mon::slot`).
     pub workspaces: Vec<Workspace>,
-    pub current_ws: usize,
+    /// Output names, one per block of workspaces.
+    pub slots: Vec<String>,
+    /// Monitors, each with the workspace it shows; `focused` indexes the current one.
+    pub outputs: Vec<Mon>,
+    pub focused: usize,
     pub drag: Option<Drag>,
     /// Share of each dwindle split taken by the first window.
     pub split_ratio: f32,
-    pub output: Output,
     pub config: Config,
     /// Present on a real (TTY) session: used for VT switching.
     pub session: Option<LibSeatSession>,
     /// Cursor requested by the focused client (drawn by the TTY backend).
     pub cursor_status: CursorImageStatus,
     /// Screenshot requested over the control socket; served by the backend after the next frame.
-    pub pending_shot: Option<(std::path::PathBuf, std::os::unix::net::UnixStream)>,
+    pub pending_shot: Option<(std::path::PathBuf, usize, std::os::unix::net::UnixStream)>,
     pub running: bool,
 }
 
@@ -107,18 +148,53 @@ impl ClientData for ClientState {
 
 impl State {
     /// Find the window (on any workspace) whose root surface is `surface`.
+    /// Apply `general.scale` to every output, re-place the outputs and tell every toplevel/layer
+    /// surface about the scale.
+    pub fn apply_scale(&mut self) {
+        let scale = self.config.general.scale;
+        for m in &self.outputs {
+            m.output.change_current_state(None, None, Some(smithay::output::Scale::Fractional(scale)), None);
+        }
+        self.layout_outputs();
+        let mut surfaces: Vec<WlSurface> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.entries.iter())
+            .filter_map(|e| e.window.wl_surface().map(|s| s.into_owned()))
+            .collect();
+        for m in &self.outputs {
+            surfaces.extend(layer_map_for_output(&m.output).layers().map(|l| l.wl_surface().clone()));
+        }
+        for s in surfaces {
+            with_states(&s, |states| with_fractional_scale(states, |fs| fs.set_preferred_scale(scale)));
+        }
+    }
+
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
         self.workspaces
             .iter()
             .flat_map(|ws| ws.entries.iter())
             .map(|e| &e.window)
-            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+            .find(|w| w.wl_surface().is_some_and(|s| &*s == surface))
             .cloned()
     }
 
-    fn layer_for_surface(&self, surface: &WlSurface) -> Option<LayerSurface> {
-        let map = layer_map_for_output(&self.output);
-        map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL).cloned()
+    /// The window wrapping an X11 surface (managed or override-redirect).
+    pub fn window_for_x11(&self, surface: &X11Surface) -> Option<Window> {
+        self.space
+            .elements()
+            .chain(self.workspaces.iter().flat_map(|ws| ws.entries.iter()).map(|e| &e.window))
+            .find(|w| w.x11_surface() == Some(surface))
+            .cloned()
+    }
+
+    /// The layer surface owning `surface` and the output it lives on.
+    fn layer_for_surface(&self, surface: &WlSurface) -> Option<(LayerSurface, Output)> {
+        self.outputs.iter().find_map(|m| {
+            let map = layer_map_for_output(&m.output);
+            let layer = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL).cloned()?;
+            Some((layer, m.output.clone()))
+        })
     }
 }
 
@@ -132,6 +208,9 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        if let Some(data) = client.get_data::<XWaylandClientData>() {
+            return &data.compositor_state;
+        }
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
@@ -148,9 +227,9 @@ impl CompositorHandler for State {
             if let Some(window) = self.window_for_surface(&root) {
                 window.on_commit();
             }
-            if let Some(layer) = self.layer_for_surface(&root) {
+            if let Some((layer, output)) = self.layer_for_surface(&root) {
                 // Bars may change the usable area, so re-arrange and re-tile.
-                layer_map_for_output(&self.output).arrange();
+                layer_map_for_output(&output).arrange();
                 // arrange() never sends the initial configure itself; this sends it (and any other
                 // pending change) so the client can map.
                 layer.layer_surface().send_pending_configure();
@@ -281,22 +360,28 @@ impl WlrLayerShellHandler for State {
         &mut self.layer_shell_state
     }
 
-    fn new_layer_surface(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface, _output: Option<WlOutput>, _layer: Layer, namespace: String) {
+    fn new_layer_surface(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface, wl_output: Option<WlOutput>, _layer: Layer, namespace: String) {
         tracing::info!(%namespace, "new layer surface");
+        // The requested output, or the focused one.
+        let output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .filter(|o| self.output_index(o).is_some())
+            .unwrap_or_else(|| self.focused_output().clone());
         let layer = LayerSurface::new(surface, namespace);
-        if let Err(e) = layer_map_for_output(&self.output).map_layer(&layer) {
+        if let Err(e) = layer_map_for_output(&output).map_layer(&layer) {
             tracing::warn!("failed to map layer surface: {e}");
         }
     }
 
     fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
-        let layer = layer_map_for_output(&self.output)
-            .layers()
-            .find(|l| l.layer_surface() == &surface)
-            .cloned();
-        if let Some(layer) = layer {
+        let found = self.outputs.iter().find_map(|m| {
+            let layer = layer_map_for_output(&m.output).layers().find(|l| l.layer_surface() == &surface).cloned()?;
+            Some((layer, m.output.clone()))
+        });
+        if let Some((layer, output)) = found {
             let had_focus = self.seat.get_keyboard().unwrap().current_focus().as_ref() == Some(layer.wl_surface());
-            layer_map_for_output(&self.output).unmap_layer(&layer);
+            layer_map_for_output(&output).unmap_layer(&layer);
             self.relayout();
             if had_focus {
                 self.focus_top();
@@ -326,8 +411,147 @@ impl SeatHandler for State {
     }
 }
 
+/// A client asked to be focused (e.g. a launched app, or a notification click). Only tokens that
+/// came from a user input event and are recent are honoured, so apps cannot steal focus on their own.
+impl XdgActivationHandler for State {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData, surface: WlSurface) {
+        if data.serial.is_none() || data.timestamp.elapsed().as_secs() >= 10 {
+            tracing::debug!("ignoring activation request without a fresh input serial");
+            return;
+        }
+        let Some(window) = self.window_for_surface(&surface) else { return };
+        if let Some(ws) = self.workspaces.iter().position(|ws| ws.entries.iter().any(|e| e.window == window)) {
+            if self.show_workspace(ws) {
+                self.focus_window(&window);
+            }
+        }
+    }
+}
+
+impl TabletSeatHandler for State {}
+
+impl IdleNotifierHandler for State {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
+        &mut self.idle_notifier_state
+    }
+}
+
+impl IdleInhibitHandler for State {
+    fn inhibit(&mut self, surface: WlSurface) {
+        self.inhibitors.push(surface);
+        self.idle_notifier_state.set_is_inhibited(true);
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        self.inhibitors.retain(|s| s != &surface);
+        self.idle_notifier_state.set_is_inhibited(!self.inhibitors.is_empty());
+    }
+}
+
+impl SessionLockHandler for State {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        if self.locked {
+            return; // dropping the locker tells the second client that it failed
+        }
+        tracing::info!("session locked");
+        self.locked = true;
+        self.effects.clear();
+        self.drag = None;
+        // Nothing but black is drawn from here on, so locking can be confirmed right away.
+        let keyboard = self.seat.get_keyboard().unwrap();
+        keyboard.set_focus(self, None, smithay::utils::SERIAL_COUNTER.next_serial());
+        confirmation.lock();
+    }
+
+    fn unlock(&mut self) {
+        tracing::info!("session unlocked");
+        self.locked = false;
+        self.lock_surfaces.clear();
+        self.focus_top();
+    }
+
+    fn new_surface(&mut self, surface: LockSurface, wl_output: WlOutput) {
+        let Some(output) = Output::from_resource(&wl_output) else { return };
+        let size = self.space.output_geometry(&output).unwrap_or_default().size;
+        surface.with_pending_state(|s| s.size = Some((size.w as u32, size.h as u32).into()));
+        surface.send_configure();
+        self.lock_surfaces.push((output, surface));
+        self.focus_lock_surface();
+    }
+}
+
+impl State {
+    /// While locked, keyboard focus belongs to the lock surface of the focused output.
+    pub fn focus_lock_surface(&mut self) {
+        let focused = self.focused_output().clone();
+        let target = self
+            .lock_surfaces
+            .iter()
+            .find(|(o, s)| *o == focused && s.alive())
+            .or_else(|| self.lock_surfaces.iter().find(|(_, s)| s.alive()))
+            .map(|(_, s)| s.wl_surface().clone());
+        let keyboard = self.seat.get_keyboard().unwrap();
+        keyboard.set_focus(self, target, smithay::utils::SERIAL_COUNTER.next_serial());
+    }
+}
+
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // Walk up to the root so subsurfaces and popups get the same scale as their window.
+        let mut root = surface;
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let scale = self.config.general.scale;
+        with_states(&root, |states| with_fractional_scale(states, |fs| fs.set_preferred_scale(scale)));
+    }
+}
+
 impl SelectionHandler for State {
     type SelectionUserData = ();
+
+    // Wayland client set a selection: offer it to X11 clients.
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
+                tracing::warn!("failed to forward {ty:?} selection to X11: {e:?}");
+            }
+        }
+    }
+
+    // An X11 client wants to read the Wayland selection.
+    fn send_selection(&mut self, ty: SelectionTarget, mime_type: String, fd: OwnedFd, _seat: Seat<Self>, _data: &()) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.send_selection(ty, mime_type, fd, self.loop_handle.clone()) {
+                tracing::warn!("failed to send {ty:?} selection to X11: {e:?}");
+            }
+        }
+    }
+}
+
+impl XWaylandShellHandler for State {
+    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+        &mut self.xwayland_shell_state
+    }
+
+    // The window now has a wl_surface: if it is the one that should have focus, focus it.
+    fn surface_associated(&mut self, _xwm: XwmId, _wl_surface: WlSurface, surface: X11Surface) {
+        if let Some(window) = self.window_for_x11(&surface) {
+            if self.mon_of_window(&window) == Some(self.focused)
+                && self.focused_stack_top().as_ref() == Some(&window)
+            {
+                self.focus_window(&window);
+            }
+        }
+    }
 }
 
 impl DataDeviceHandler for State {
@@ -357,6 +581,14 @@ delegate_compositor!(State);
 delegate_shm!(State);
 delegate_output!(State);
 delegate_viewporter!(State);
+delegate_cursor_shape!(State);
+delegate_fractional_scale!(State);
+delegate_xdg_activation!(State);
+delegate_xwayland_shell!(State);
+delegate_idle_notify!(State);
+delegate_idle_inhibit!(State);
+delegate_session_lock!(State);
+delegate_presentation!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);
 delegate_layer_shell!(State);

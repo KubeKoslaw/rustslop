@@ -7,13 +7,14 @@ use smithay::{
         renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    desktop::{layer_map_for_output, space::render_output},
+    desktop::layer_map_for_output,
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::{
         timer::{TimeoutAction, Timer},
         LoopHandle,
     },
-    utils::Transform,
+    reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
+    utils::{Monotonic, Transform},
 };
 
 use crate::{control, state::State};
@@ -57,6 +58,7 @@ impl Winit {
                 WinitEvent::Resized { size, .. } => {
                     output.change_current_state(Some(Mode { size, refresh: 60_000 }), None, None, None);
                     layer_map_for_output(&output).arrange();
+                    state.layout_outputs();
                     state.relayout();
                 }
                 WinitEvent::Input(event) => state.handle_input(event),
@@ -85,22 +87,13 @@ fn frame(
     time: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let age = backend.buffer_age().unwrap_or(0);
-    let borders = state.border_elements();
-    let background = state.config.background;
-    let damage = {
+    let background = super::clear_color(state);
+    let (damage, mut feedback) = {
         let (renderer, mut framebuffer) = backend.bind()?;
-        let result = render_output(
-            output,
-            renderer,
-            &mut framebuffer,
-            1.0,
-            age,
-            [&state.space],
-            &borders,
-            damage_tracker,
-            background,
-        )?;
-        result.damage.cloned()
+        let elements = super::scene_elements(state, renderer, output);
+        let result = damage_tracker.render_output(renderer, &mut framebuffer, age, &elements, background)?;
+        let feedback = super::collect_feedback(state, output, &result.states);
+        (result.damage.cloned(), feedback)
     };
 
     state.send_frames(output, time);
@@ -109,11 +102,23 @@ fn frame(
     let _ = state.display_handle.flush_clients();
     if let Some(damage) = damage {
         backend.submit(Some(&damage))?;
+        // Nested, there is no real scan-out: report presentation as soon as the swap returns.
+        feedback.presented::<_, Monotonic>(
+            state.clock.now(),
+            super::refresh_of(output),
+            0,
+            wp_presentation_feedback::Kind::empty(),
+        );
+    }
+
+    if state.has_pending_screencopy() {
+        state.serve_screencopy(|state, output| super::render_to_rgba(backend.renderer(), state, output));
     }
 
     // Screenshots are rendered offscreen so the window's EGL surface is left alone.
-    if let Some((path, stream)) = state.pending_shot.take() {
-        let reply = match super::screenshot(backend.renderer(), output, &state.space, &borders, background, &path) {
+    if let Some((path, mon, stream)) = state.pending_shot.take() {
+        let target = state.outputs[mon].output.clone();
+        let reply = match super::screenshot(backend.renderer(), state, &target, &path) {
             Ok(()) => "ok".to_string(),
             Err(e) => format!("error: {e}"),
         };

@@ -4,6 +4,8 @@
 # Programs started once when the compositor starts (run through `sh -c`).
 autostart = [
   # "waybar",
+  # On Gentoo/OpenRC one command starts pipewire, pipewire-pulse and wireplumber in this session:
+  # "gentoo-pipewire-launcher",
 ]
 
 [general]
@@ -11,7 +13,29 @@ gap = 12              # pixels between windows and screen edges
 border = 2            # focus border width (keep <= gap)
 terminal = "konsole"  # used by the plain `spawn` action
 split_ratio = 0.5     # share of each split taken by the first window (0.1-0.9)
+xwayland = true       # run Xwayland for X11 apps (needs the Xwayland binary)
+scale = 1.0           # output scale, fractional allowed (1.25, 1.5, ...)
 modifier = "auto"     # "auto" = super on a real session, alt when nested in another desktop; or "alt"/"super"
+
+# Default programs. Reference them from keybinds as "spawn:@launcher" (optionally with arguments,
+# e.g. "spawn:@terminal -e htop"). Defaults: mod+d launcher, mod+b browser, mod+e file manager,
+# mod+shift+x lock, mod+s settings.
+[apps]
+terminal = ""                      # empty = use general.terminal
+launcher = "fuzzel"
+browser = "xdg-open https://"
+file_manager = "xdg-open ."
+lock = "swaylock -f -c 000000"
+settings = "rusted-settings"      # the GUI settings app (mod+s)
+
+# Per-output overrides, keyed by connector name (see `rusted-wm ctl info` or the session log).
+# mode = "WIDTHxHEIGHT[@REFRESH]" forces a mode; without it the monitor's preferred mode is used.
+# Example: run a 75 Hz panel at 75 Hz instead of its preferred 60 Hz, on the right of a
+# 1920-wide monitor. `position` is in logical pixels; monitors without one are placed to the
+# right of the configured ones, in connector order.
+# [outputs.DP-1]
+# mode = "1920x1080@75"
+# position = "1920,0"
 
 [input]
 layout = ""           # xkb layout, e.g. "pl" or "us,de" (empty = system default)
@@ -20,18 +44,51 @@ options = ""          # e.g. "caps:escape"
 repeat_delay = 200    # ms
 repeat_rate = 25      # keys/s
 tap_to_click = true   # touchpads (TTY session only)
-natural_scroll = false
+natural_scroll = false        # touchpads only
+mouse_natural_scroll = false  # mice (wheel direction); leave false for the usual behaviour
 
 [colors]
 focused = "#73a6ff"
 unfocused = "#40455a"
 background = "#14141f"
+# pywal: use the palette from ~/.cache/wal/colors.json for the three colours above. The compositor
+# notices when `wal -i IMAGE` writes a new one (within a couple of seconds) and recolours.
+# Choose which pywal colour goes where: background, foreground, cursor or color0..color15.
+pywal = false
+pywal_focused = "color4"
+pywal_unfocused = "color8"
+pywal_background = "background"
+
+# Volume/mute actions (volume-up, volume-down, volume-mute, mic-mute) are bound to the XF86Audio*
+# keys by default, so media keys and keyboard knobs work out of the box. Uses wpctl (PipeWire),
+# falling back to pactl. Run with RUST_LOG=debug to see every key press if a key does nothing.
+[audio]
+step = 5            # percent per key press
+max_volume = 100    # limit in percent (up to 150 = software boost)
+notify = true       # show the new level with notify-send (needs mako/dunst)
 
 # Merged over the defaults. "mod" is the modifier above. Use "none" to remove a default bind.
 # Actions: spawn, spawn:CMD ARGS, close, focus-next, focus-left/right/up/down, toggle-floating,
-#          swap-left/right/up/down, grow, shrink, toggle-fullscreen,
-#          workspace:N, move-to-workspace:N (N = 1-9), reload, quit
+#          swap-left/right/up/down, move-to-output-left/right/up/down, grow, shrink, toggle-fullscreen,
+#          workspace:N, move-to-workspace:N (N = 1-9), volume-up/down/mute, mic-mute, reload, quit
 [keybinds]
 # "mod+d" = "spawn:fuzzel"
 # "mod+shift+q" = "close"
 # "mod+tab" = "none"
+
+# Optional effects (live reload; off by default for compatibility).
+# Desktop wallpaper. The rice's wallpaper.py watches this section and restarts swaybg when it
+# changes, so the settings app applies a new image live. Empty path = the [colors] background.
+[wallpaper]
+path = ""            # image file (PNG, JPEG or WebP)
+mode = "fill"        # fill, fit, stretch, center or tile
+
+[appearance]
+corner_radius = 0
+shadow_enabled = false
+shadow_size = 24
+shadow_opacity = 0.24
+blur_enabled = false
+blur_radius = 8
+animations_enabled = false
+animation_duration_ms = 180

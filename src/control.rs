@@ -28,8 +28,8 @@ pub struct Control {
 /// What the main loop must do after a command ran.
 pub enum Reply {
     Text(String),
-    /// Take a screenshot into this path, then answer "ok".
-    Screenshot(PathBuf),
+    /// Take a screenshot of output N into this path, then answer "ok".
+    Screenshot(PathBuf, usize),
 }
 
 impl Control {
@@ -87,6 +87,29 @@ impl State {
         let ok = || Reply::Text("ok".into());
 
         match parts.first().copied() {
+            Some("outputs-json") => {
+                let outputs: Vec<_> = self.outputs.iter().map(|m| {
+                    let g = self.space.output_geometry(&m.output).unwrap_or_default();
+                    let first = m.slot * crate::wm::WORKSPACE_COUNT;
+                    let workspaces: Vec<_> = (0..crate::wm::WORKSPACE_COUNT).map(|n| serde_json::json!({
+                        "number": n + 1, "active": first + n == m.ws,
+                        "windows": self.workspaces[first + n].entries.len()
+                    })).collect();
+                    serde_json::json!({"name": m.output.name(), "width": g.size.w, "height": g.size.h,
+                        "scale": m.output.current_scale().fractional_scale(), "workspaces": workspaces})
+                }).collect();
+                return Reply::Text(serde_json::to_string(&outputs).unwrap());
+            }
+            Some("ws-on") => {
+                let Some(mon) = parts.get(1).and_then(|name| self.outputs.iter().position(|m| m.output.name() == *name)) else {
+                    return err("ws-on OUTPUT N: unknown output");
+                };
+                let Some(n) = parts.get(2).and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=crate::wm::WORKSPACE_COUNT).contains(n)) else {
+                    return err("ws-on OUTPUT N: N must be 1-9");
+                };
+                if !self.locked { self.focus_output(mon); self.switch_workspace(n - 1); }
+            }
+
             Some("spawn") => {
                 let term = self.config.general.terminal.clone();
                 self.run_action(Action::Exec(term))
@@ -98,6 +121,16 @@ impl State {
                 }
             }
             Some("exec") if parts.len() > 1 => self.spawn(&parts[1..].join(" ")),
+            Some("volume") => {
+                use crate::audio::AudioCmd::*;
+                match parts.get(1).copied() {
+                    Some("up") => self.run_action(Action::Audio(VolumeUp)),
+                    Some("down") => self.run_action(Action::Audio(VolumeDown)),
+                    Some("mute") => self.run_action(Action::Audio(VolumeMute)),
+                    Some("mic-mute") => self.run_action(Action::Audio(MicMute)),
+                    _ => return err("volume up|down|mute|mic-mute"),
+                }
+            }
             Some("close") => self.run_action(Action::Close),
             Some("next") => self.run_action(Action::FocusNext),
             Some("float") => self.run_action(Action::ToggleFloating),
@@ -119,9 +152,21 @@ impl State {
                 Some("j") => self.run_action(Action::FocusDir(0, 1)),
                 _ => return err("focus h|j|k|l"),
             },
+            // `ws next|prev [OUTPUT]`: relative to that monitor's workspace (default: the focused one).
+            Some("ws") if matches!(parts.get(1).copied(), Some("next" | "prev")) => {
+                let n = crate::wm::WORKSPACE_COUNT;
+                let mon = self.mon_by_name(parts.get(2).copied());
+                let cur = State::ws_number(self.outputs[mon].ws);
+                let target = if parts[1] == "next" { (cur + 1) % n } else { (cur + n - 1) % n };
+                self.switch_on(mon, target);
+            }
+            Some("ws-json") => return Reply::Text(self.workspaces_json(parts.get(1).copied())),
             Some("ws") => match num(1) {
-                Some(n) if n >= 1.0 => self.run_action(Action::Workspace(n as usize - 1)),
-                _ => return err("ws N (1-9)"),
+                Some(n) if n >= 1.0 => {
+                    let mon = self.mon_by_name(parts.get(2).copied());
+                    self.switch_on(mon, n as usize - 1);
+                }
+                _ => return err("ws N [OUTPUT] (1-9)"),
             },
             Some("mv") => match num(1) {
                 Some(n) if n >= 1.0 => self.run_action(Action::MoveToWorkspace(n as usize - 1)),
@@ -154,39 +199,134 @@ impl State {
                 }
                 _ => return err("drag move|resize X1 Y1 X2 Y2"),
             },
-            Some("shot") if parts.len() == 2 => return Reply::Screenshot(PathBuf::from(parts[1])),
+            Some("shot") if parts.len() == 2 || parts.len() == 3 => {
+                let mon = parts.get(2).and_then(|n| n.parse::<usize>().ok()).unwrap_or(1).max(1) - 1;
+                return Reply::Screenshot(PathBuf::from(parts[1]), mon.min(self.outputs.len() - 1));
+            }
+            Some("output") => match (parts.get(1).copied(), num(2), num(3)) {
+                (Some("add"), Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => self.add_virtual_output(w as i32, h as i32),
+                (Some("rm"), _, _) => self.remove_last_output(),
+                (Some("focus"), Some(n), _) if n >= 1.0 => self.focus_output(n as usize - 1),
+                _ => return err("output add W H | output rm | output focus N"),
+            },
+            Some("mvout") => match parts.get(1).copied() {
+                Some("h") => self.run_action(Action::MoveToOutput(-1, 0)),
+                Some("l") => self.run_action(Action::MoveToOutput(1, 0)),
+                Some("k") => self.run_action(Action::MoveToOutput(0, -1)),
+                Some("j") => self.run_action(Action::MoveToOutput(0, 1)),
+                _ => return err("mvout h|j|k|l"),
+            },
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, volume up|down|mute|mic-mute, ws N|next|prev [OUTPUT], ws-json [OUTPUT], mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
         }
         ok()
+    }
+
+    /// Monitor called `name`; the focused one when `name` is absent or unknown (a Waybar config
+    /// template still holding the `@OUTPUT@` placeholder then behaves sensibly).
+    fn mon_by_name(&self, name: Option<&str>) -> usize {
+        name.and_then(|n| self.outputs.iter().position(|m| m.output.name() == n)).unwrap_or(self.focused)
+    }
+
+    /// Show workspace number `n` on monitor `mon`; another monitor than the focused one also
+    /// takes the focus (a click or scroll on its bar counts as being there).
+    fn switch_on(&mut self, mon: usize, n: usize) {
+        if mon == self.focused {
+            self.run_action(Action::Workspace(n));
+        } else if n < crate::wm::WORKSPACE_COUNT {
+            let idx = self.outputs[mon].slot * crate::wm::WORKSPACE_COUNT + n;
+            self.show_workspace(idx);
+        }
+    }
+
+    /// Waybar `custom` module payload (`return-type: json`): occupied and visible workspaces with
+    /// Pango markup. With an output name, "current" means the workspace shown on that output.
+    fn workspaces_json(&self, output: Option<&str>) -> String {
+        let mon = output
+            .and_then(|name| self.outputs.iter().position(|m| m.output.name() == name))
+            .unwrap_or(self.focused);
+        let shown = self.outputs[mon].ws;
+        let mut text = Vec::new();
+        // Only this monitor's own workspaces.
+        let first = self.outputs[mon].slot * crate::wm::WORKSPACE_COUNT;
+        for n in 0..crate::wm::WORKSPACE_COUNT {
+            let (i, ws) = (first + n, &self.workspaces[first + n]);
+            let label = if i == shown {
+                format!("<span foreground='#8aadf4'><b> {} </b></span>", n + 1)
+            } else if !ws.entries.is_empty() {
+                format!(" {} ", n + 1)
+            } else {
+                continue;
+            };
+            text.push(label);
+        }
+        let windows: usize = self.workspaces[shown].entries.len();
+        format!(
+            "{{\"text\": \"{}\", \"tooltip\": \"workspace {} ({} window(s))\", \"class\": \"ws-{}\"}}",
+            text.join("").replace('\'', "\\u0027"),
+            State::ws_number(shown) + 1,
+            windows,
+            State::ws_number(shown) + 1
+        )
     }
 
     /// Human/AI readable dump of the whole window state.
     fn describe(&self) -> String {
         let focused = self.focused_window();
         let mut out = String::new();
-        let o = self.space.output_geometry(&self.output).unwrap_or_default();
-        out += &format!("output {}x{} current_ws={}\n", o.size.w, o.size.h, self.current_ws + 1);
+        out += &format!("locked={}\n", self.locked);
+        let hex = |c: smithay::backend::renderer::Color32F| {
+            let b = |v: f32| (v * 255.0).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", b(c.r()), b(c.g()), b(c.b()))
+        };
+        out += &format!(
+            "colors focused={} unfocused={} background={} pywal={}\n",
+            hex(self.config.focused),
+            hex(self.config.unfocused),
+            hex(self.config.background),
+            self.config.pywal_file.is_some()
+        );
+        for (n, m) in self.outputs.iter().enumerate() {
+            let o = self.space.output_geometry(&m.output).unwrap_or_default();
+            out += &format!(
+                "output {}x{} at {},{} name={} current_ws={} focused={}\n",
+                o.size.w, o.size.h, o.loc.x, o.loc.y, m.output.name(), State::ws_number(m.ws) + 1, n == self.focused
+            );
+        }
         for (i, ws) in self.workspaces.iter().enumerate() {
-            if ws.entries.is_empty() && i != self.current_ws {
+            let visible = self.outputs.iter().any(|m| m.ws == i);
+            if ws.entries.is_empty() && !visible {
                 continue;
             }
-            out += &format!("ws {}{}: {} window(s)\n", i + 1, if i == self.current_ws { " (current)" } else { "" }, ws.entries.len());
+            // "ws 3" with one monitor; "ws 3@DP-1" once there are several (each has its own 1-9).
+            let name = if self.slots.len() > 1 { format!("@{}", self.slots[i / crate::wm::WORKSPACE_COUNT]) } else { String::new() };
+            out += &format!(
+                "ws {}{name}{}: {} window(s)\n",
+                State::ws_number(i) + 1,
+                if visible { " (visible)" } else { "" },
+                ws.entries.len()
+            );
             for e in &ws.entries {
-                let (title, app_id) = e
-                    .window
-                    .toplevel()
-                    .map(|t| {
-                        with_states(t.wl_surface(), |s| {
-                            let d = s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap();
-                            (d.title.clone().unwrap_or_default(), d.app_id.clone().unwrap_or_default())
+                let (title, app_id) = if let Some(x) = e.window.x11_surface() {
+                    (x.title(), x.class())
+                } else {
+                    e.window
+                        .toplevel()
+                        .map(|t| {
+                            with_states(t.wl_surface(), |s| {
+                                let d = s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap();
+                                (d.title.clone().unwrap_or_default(), d.app_id.clone().unwrap_or_default())
+                            })
                         })
-                    })
-                    .unwrap_or_default();
-                let activated = e.window.toplevel().is_some_and(|t| {
-                    t.current_state().states.contains(xdg_toplevel::State::Activated)
-                });
-                let geo = if i == self.current_ws { self.space.element_geometry(&e.window) } else { None };
+                        .unwrap_or_default()
+                };
+                let activated = match e.window.x11_surface() {
+                    Some(x) => x.is_activated(),
+                    None => e.window.toplevel().is_some_and(|t| {
+                        t.current_state().states.contains(xdg_toplevel::State::Activated)
+                    }),
+                };
+                let geo = if visible { self.space.element_geometry(&e.window) } else { None };
                 out += &format!(
                     "  - app_id={app_id:?} title={title:?} floating={} fullscreen={} focused={} activated={} geo={}\n",
                     e.floating,

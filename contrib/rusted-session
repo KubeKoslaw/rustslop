@@ -19,6 +19,10 @@ export MOZ_ENABLE_WAYLAND=1
 export ELECTRON_OZONE_PLATFORM_HINT=auto
 export _JAVA_AWT_WM_NONREPARENTING=1
 
+# Optional per-session appearance environment installed by the rice preset.
+rice_env="${XDG_CONFIG_HOME:-$HOME/.config}/rusted-rice/session.env"
+[ ! -f "$rice_env" ] || . "$rice_env"
+
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/rusted-wm"
 mkdir -p "$state_dir" 2>/dev/null
 if [ -d "$state_dir" ]; then
