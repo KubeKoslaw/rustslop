@@ -69,6 +69,7 @@ use crate::{
 };
 
 pub struct State {
+    pub effects: crate::effects::Effects,
     pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -462,6 +463,7 @@ impl SessionLockHandler for State {
         }
         tracing::info!("session locked");
         self.locked = true;
+        self.effects.clear();
         self.drag = None;
         // Nothing but black is drawn from here on, so locking can be confirmed right away.
         let keyboard = self.seat.get_keyboard().unwrap();

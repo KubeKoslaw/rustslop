@@ -1,31 +1,173 @@
-// Example Waybar config for rusted-wm. Copy to ~/.config/waybar/.
-//
-// rusted-wm has no sway/hyprland IPC, so the workspace indicator is a `custom` module fed by the
-// compositor's control socket (`rusted-wm ctl ws-json`). Scroll over it to change workspace.
-//
-// "@OUTPUT@" is replaced with the monitor's name by `rusted-waybar`, which starts one bar per
-// monitor so each shows ITS OWN workspaces (every monitor has its own 1-9). Started by plain
-// `waybar`, the placeholder is unknown to the compositor and the focused monitor is shown.
+// Per-output reference template. Install contrib/rice for the helper and compact layouts.
 {
+  "name": "rusted",
+  "output": "@OUTPUT@",
   "layer": "top",
   "position": "top",
-  "height": 30,
-  "modules-left": ["custom/workspaces"],
-  "modules-center": ["clock"],
-  "modules-right": ["pulseaudio", "network", "cpu", "memory", "battery", "tray"],
-
-  "custom/workspaces": {
-    "exec": "rusted-wm ctl ws-json @OUTPUT@",
+  "height": 36,
+  "margin-top": 10,
+  "margin-bottom": 0,
+  "margin-left": 10,
+  "margin-right": 10,
+  "spacing": 8,
+  "fixed-center": true,
+  "modules-left": [
+    "custom/launcher",
+    "group/desktops"
+  ],
+  "modules-center": [
+    "clock"
+  ],
+  "modules-right": [
+    "custom/media",
+    "group/status",
+    "tray"
+  ],
+  "group/desktops": {
+    "orientation": "horizontal",
+    "modules": [
+      "custom/ws1",
+      "custom/ws2",
+      "custom/ws3",
+      "custom/ws4",
+      "custom/ws5",
+      "custom/ws6",
+      "custom/ws7",
+      "custom/ws8",
+      "custom/ws9"
+    ]
+  },
+  "group/status": {
+    "orientation": "horizontal",
+    "modules": [
+      "pulseaudio",
+      "network",
+      "custom/system"
+    ]
+  },
+  "custom/launcher": {
+    "format": "\uf135",
+    "tooltip": false,
+    "on-click": "fuzzel"
+  },
+  "clock": {
+    "format": "{:%H:%M}",
+    "tooltip-format": "<big>{:%A, %d %B %Y}</big>\n<tt><small>{calendar}</small></tt>",
+    "calendar": {
+      "mode": "month",
+      "weeks-pos": "right"
+    }
+  },
+  "custom/media": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py media 28",
+    "return-type": "json",
+    "interval": 2,
+    "on-click": "playerctl play-pause",
+    "on-scroll-up": "playerctl next",
+    "on-scroll-down": "playerctl previous",
+    "escape": false
+  },
+  "pulseaudio": {
+    "format": "\uf028 {volume}%",
+    "format-muted": "\uf6a9",
+    "tooltip-format": "{desc}",
+    "on-click": "pavucontrol",
+    "on-click-right": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+    "scroll-step": 5
+  },
+  "network": {
+    "format-wifi": "\uf1eb",
+    "format-ethernet": "\uf6ff",
+    "format-disconnected": "\uf127",
+    "tooltip-format-wifi": "{essid} \u00b7 {signalStrength}%\n{ipaddr}",
+    "tooltip-format-ethernet": "{ifname}\n{ipaddr}"
+  },
+  "battery": {
+    "format": "{icon} {capacity}%",
+    "format-charging": "\uf0e7 {capacity}%",
+    "format-icons": [
+      "\uf244",
+      "\uf243",
+      "\uf242",
+      "\uf241",
+      "\uf240"
+    ],
+    "states": {
+      "warning": 30,
+      "critical": 15
+    }
+  },
+  "custom/system": {
+    "format": "{}",
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py system",
+    "return-type": "json",
+    "interval": 5
+  },
+  "tray": {
+    "icon-size": 16,
+    "spacing": 10
+  },
+  "custom/ws1": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 1",
     "return-type": "json",
     "interval": 1,
-    "on-scroll-up": "rusted-wm ctl ws prev @OUTPUT@",
-    "on-scroll-down": "rusted-wm ctl ws next @OUTPUT@"
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 1",
+    "tooltip": true
   },
-  "clock": { "format": "{:%a %d %b  %H:%M}" },
-  "cpu": { "format": "cpu {usage}%" },
-  "memory": { "format": "mem {percentage}%" },
-  "battery": { "format": "bat {capacity}%" },
-  "network": { "format-wifi": "{essid}", "format-ethernet": "eth", "format-disconnected": "offline" },
-  "pulseaudio": { "format": "vol {volume}%", "on-click": "pavucontrol" },
-  "tray": { "spacing": 8 }
+  "custom/ws2": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 2",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 2",
+    "tooltip": true
+  },
+  "custom/ws3": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 3",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 3",
+    "tooltip": true
+  },
+  "custom/ws4": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 4",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 4",
+    "tooltip": true
+  },
+  "custom/ws5": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 5",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 5",
+    "tooltip": true
+  },
+  "custom/ws6": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 6",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 6",
+    "tooltip": true
+  },
+  "custom/ws7": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 7",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 7",
+    "tooltip": true
+  },
+  "custom/ws8": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 8",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 8",
+    "tooltip": true
+  },
+  "custom/ws9": {
+    "exec": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py workspace @OUTPUT@ 9",
+    "return-type": "json",
+    "interval": 1,
+    "on-click": "/usr/lib/python-exec/python3.14/python3 $HOME/.config/rusted-rice/waybar.py switch @OUTPUT@ 9",
+    "tooltip": true
+  }
 }

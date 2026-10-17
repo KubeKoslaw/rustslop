@@ -149,6 +149,26 @@ impl State {
         }
     }
 
+    /// Match the rendered rounded shape, while keeping popup input outside its parent.
+    fn window_under_rounded(&self, pos: Point<f64, Logical>) -> Option<(smithay::desktop::Window, Point<i32, Logical>)> {
+        self.space.elements().rev().find_map(|window| {
+            let location = self.space.element_location(window)?;
+            let geometry = window.geometry();
+            let origin = location - geometry.loc;
+            let local = pos - origin.to_f64();
+            if window.surface_under(local, WindowSurfaceType::POPUP | WindowSurfaceType::SUBSURFACE).is_some() {
+                return Some((window.clone(), origin));
+            }
+            let fullscreen = self.workspaces.iter().flat_map(|ws| &ws.entries).any(|e| e.window == *window && e.fullscreen);
+            let radius = if fullscreen { 0 } else { self.config.appearance.corner_radius };
+            let point = pos - location.to_f64();
+            if crate::effects::contains_rounded((geometry.size.w, geometry.size.h), (point.x, point.y), radius)
+                && window.surface_under(local, WindowSurfaceType::ALL).is_some() {
+                Some((window.clone(), origin))
+            } else { None }
+        })
+    }
+
     /// Surface under `pos` with its origin in global coordinates. Overlay/top layer surfaces
     /// (bars, launchers) are above windows, bottom/background ones below.
     fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
@@ -172,7 +192,7 @@ impl State {
         if let Some(hit) = layer_hit(&[WlrLayer::Overlay, WlrLayer::Top]) {
             return Some(hit);
         }
-        if let Some((window, loc)) = self.space.element_under(pos) {
+        if let Some((window, loc)) = self.window_under_rounded(pos) {
             if let Some((surface, offset)) = window.surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL) {
                 return Some((surface, (loc + offset).to_f64()));
             }
@@ -243,7 +263,7 @@ impl State {
             return;
         }
         if state == ButtonState::Pressed && alt && (button == BTN_LEFT || button == BTN_RIGHT) {
-            if let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) {
+            if let Some(window) = self.window_under_rounded(pos).map(|(w, _)| w) {
                 let kind = if button == BTN_LEFT { DragKind::Move } else { DragKind::Resize };
                 self.begin_drag(&window, kind, pos);
                 return;
@@ -269,7 +289,7 @@ impl State {
             };
             if let Some(layer) = layer {
                 self.focus_surface(layer.wl_surface().clone());
-            } else if let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) {
+            } else if let Some(window) = self.window_under_rounded(pos).map(|(w, _)| w) {
                 self.focus_window(&window);
             }
         }

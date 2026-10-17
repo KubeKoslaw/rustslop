@@ -37,6 +37,7 @@ smithay::backend::renderer::element::render_elements! {
     /// One drawable piece of the scene.
     pub SceneElement<=GlesRenderer>;
     Solid = SolidColorRenderElement,
+    Texture = smithay::backend::renderer::element::texture::TextureRenderElement<GlesTexture>,
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
 }
 
@@ -58,6 +59,13 @@ pub fn scene_elements(state: &mut State, renderer: &mut GlesRenderer, output: &O
             }
         }
         return out;
+    }
+
+    if state.config.appearance.enabled() {
+        let mut effects = std::mem::take(&mut state.effects);
+        let image = effects.render(state, renderer, output);
+        state.effects = effects;
+        if let Some(image) = image { return vec![SceneElement::Texture(image)]; }
     }
 
     let layer_elements = |renderer: &mut GlesRenderer, upper: bool| -> Vec<SceneElement> {

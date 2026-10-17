@@ -64,6 +64,10 @@ impl Headless {
         let Headless { output: _, mut renderer } = self;
         let start = std::time::Instant::now();
         handle.insert_source(Timer::from_duration(FRAME_INTERVAL), move |_, _, state| {
+            if state.config.appearance.enabled() && !state.locked {
+                let outputs: Vec<_> = state.outputs.iter().map(|m| m.output.clone()).collect();
+                for output in outputs { let _ = super::scene_elements(state, &mut renderer, &output); }
+            }
             if let Some((path, mon, stream)) = state.pending_shot.take() {
                 let target = state.outputs[mon].output.clone();
                 let reply = match super::screenshot(&mut renderer, state, &target, &path) {

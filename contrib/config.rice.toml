@@ -13,7 +13,7 @@ autostart = [
   "sh -c 'pgrep -x wireplumber >/dev/null || wireplumber'",
   "sh -c 'pgrep -x pipewire-pulse >/dev/null || pipewire-pulse'",
   "swaybg -i \"$HOME/.config/rusted-rice/wallpapers/nixos.png\" -m fill",
-  "rusted-waybar",   # one bar per monitor, each with its own workspaces (plain "waybar" works too)
+  "python3 ~/.config/rusted-rice/waybar.py supervise",
   "mako",
   "wl-paste --watch cliphist store",
 ]

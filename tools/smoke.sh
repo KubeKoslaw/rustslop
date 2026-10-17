@@ -5,6 +5,9 @@
 set -u
 cd "$(dirname "$0")/.."
 OUT=${1:-${TMPDIR:-/tmp}/rusted-smoke}; mkdir -p "$OUT"; : > "$OUT/config.toml"
+# Own runtime dir: stray clients from other sessions (panels, leftover test runs) must never attach
+# to this compositor, and stale sockets from earlier runs cannot collide with it.
+RUNTIME_DIR=$(mktemp -d "$OUT/runtime.XXXXXX"); chmod 700 "$RUNTIME_DIR"; export XDG_RUNTIME_DIR="$RUNTIME_DIR"
 CTL=tools/ctl.py
 pass=0; fail=0
 check() { # name, condition-exit-status
@@ -25,6 +28,7 @@ cleanup() {
   [ -n "$WMPID" ] && kill "$WMPID" 2>/dev/null
   kill_test_terminals
   [ -n "${LAYERPID:-}" ] && kill "$LAYERPID" 2>/dev/null
+  [ -n "${RUNTIME_DIR:-}" ] && rm -rf "$RUNTIME_DIR"
 }
 trap cleanup EXIT
 
@@ -205,7 +209,7 @@ check "ws next OUTPUT moves that monitor on" $($CTL info | grep '^output ' | sed
 check "ws-json OUTPUT reports that monitor's workspace" $($CTL ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
 check "rusted-wm ctl reaches the compositor (no Python needed)" $(WAYLAND_DISPLAY=$SOCK ./target/debug/rusted-wm ctl ws-json virtual-2 | grep -q 'workspace 4'; echo $?)
 RUSTED_WM="$PWD/target/debug/rusted-wm" contrib/rusted-waybar --config contrib/waybar/config.jsonc --print HDMI-A-1 DP-1 > "$OUT/waybar-bars.json"
-check "rusted-waybar generates one bar per monitor with its name" $(python3 -c "import json,sys; b=json.load(open('$OUT/waybar-bars.json')); assert [x['output'] for x in b]==['HDMI-A-1','DP-1'] and 'ws-json DP-1' in b[1]['custom/workspaces']['exec'] and '@OUTPUT@' not in json.dumps(b)"; echo $?)
+check "rusted-waybar generates one bar per monitor with its name" $(python3 -c "import json,sys; b=json.load(open('$OUT/waybar-bars.json')); assert [x['output'] for x in b]==['HDMI-A-1','DP-1'] and 'workspace DP-1 1' in b[1]['custom/ws1']['exec'].replace(chr(39), '') and 'switch DP-1 1' in b[1]['custom/ws1']['on-click'].replace(chr(39), '') and '@OUTPUT@' not in json.dumps(b)"; echo $?)
 $CTL ws 1 virtual-2 >/dev/null; $CTL output focus 1 >/dev/null; $CTL ws 1 >/dev/null
 check "second output appears at x=$W0" $($CTL info | grep '^output ' | sed -n 2p | grep -q "800x600 at $W0,0"; echo $?)
 check "second output starts on its own workspace 1" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)

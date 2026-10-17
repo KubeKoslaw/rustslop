@@ -3,3 +3,7 @@
 # private planning/handoff notes (kept locally only)
 /PLAN.md
 /PROGRESS.md
+
+# tooling scratch output
+/.scratch/
+__pycache__/

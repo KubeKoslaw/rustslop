@@ -196,7 +196,7 @@ pub struct Appearance {
     pub corner_radius: i32,
     pub shadow_enabled: bool,
     pub shadow_size: i32,
-    pub shadow_opacity: f32,
+    pub shadow_opacity: f64,
     pub blur_enabled: bool,
     pub blur_radius: i32,
     pub animations_enabled: bool,

@@ -1,9 +1,44 @@
-/* pywal: uncomment to colour the bar from the current palette (pywal writes this file on every
-   `wal -i IMAGE`; it defines @background, @foreground, @color0 ... @color15). Waybar reloads its
-   style with `killall -SIGUSR2 waybar` -- better: run `pkill -USR2 waybar` from your wal hook. */
-/* @import url("file:///home/YOUR_USER/.cache/wal/colors-waybar.css"); */
-* { font-family: "Noto Sans", sans-serif; font-size: 13px; }
-window#waybar { background: rgba(20, 21, 30, 0.92); color: #cad3f5; }
-/* with the @import above:  window#waybar { background: @background; color: @foreground; } */
-#custom-workspaces, #clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray { padding: 0 10px; }
-#clock { font-weight: bold; }
+/* Rusted Soft Minimal — independently designed graphite and lavender theme. */
+* {
+  font-family: "Noto Sans", "Font Awesome 6 Free", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  min-height: 0;
+  border: none;
+  margin: 0;
+  padding: 0;
+  box-shadow: none;
+}
+window#waybar { background: transparent; color: #E6E7EF; }
+#custom-launcher, #desktops, #clock, #custom-media, #status, #tray {
+  background: rgba(32, 34, 46, 0.88);
+  border: 1px solid rgba(180, 161, 245, 0.16);
+  border-radius: 14px;
+  padding: 0 12px;
+}
+#custom-launcher { color: #B4A1F5; font-size: 16px; padding: 0 14px; }
+#desktops { padding: 3px; }
+#clock { font-weight: 700; letter-spacing: 1px; padding: 0 18px; }
+#custom-media { color: #B4A1F5; }
+#status { padding: 0 6px; }
+#pulseaudio, #network, #battery, #custom-system { padding: 0 8px; }
+#custom-ws1, #custom-ws2, #custom-ws3, #custom-ws4, #custom-ws5,
+#custom-ws6, #custom-ws7, #custom-ws8, #custom-ws9 {
+  padding: 0 8px;
+  min-width: 12px;
+  border-radius: 11px;
+  color: #656B82;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+#desktops .occupied { color: #E6E7EF; background: rgba(150,155,175,0.10); }
+#desktops .active { background: #B4A1F5; color: #14151D; font-weight: 700; }
+#desktops .empty { color: #656B82; }
+#custom-launcher:hover, #custom-media:hover { background: rgba(64, 57, 85, 0.94); }
+#pulseaudio:hover, #network:hover, #custom-system:hover { color: #B4A1F5; }
+#pulseaudio.muted, #network.disconnected { color: #969BAF; }
+#battery.warning { color: #E5BD78; }
+#battery.critical { color: #EF8797; }
+#battery.charging { color: #A3CFAA; }
+#tray { padding: 0 10px; }
+tooltip { background: #20222E; color: #E6E7EF; border-radius: 12px; border: 1px solid #383C50; }
+tooltip label { padding: 10px; }

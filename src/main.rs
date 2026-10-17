@@ -1,4 +1,5 @@
 mod audio;
+mod effects;
 mod cli;
 mod backend;
 mod config;
@@ -126,6 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let primary_selection_state = PrimarySelectionState::new::<State>(&dh);
     let data_control_state = DataControlState::new::<State, _>(&dh, Some(&primary_selection_state), |_| true);
     let mut state = State {
+        effects: effects::Effects::default(),
         display_handle: dh.clone(),
         compositor_state: CompositorState::new::<State>(&dh),
         xdg_shell_state: XdgShellState::new::<State>(&dh),
@@ -275,7 +277,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.reload_config();
                         seen = Some(modified);
                     }
-                    None => seen = Some(modified),
+                    None => {
+                        // A palette may change between enabling pywal and this first tick.
+                        state.reload_config();
+                        seen = Some(modified);
+                    },
                     _ => {}
                 }
             } else {
