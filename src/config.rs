@@ -44,10 +44,38 @@ impl Default for Colors {
     }
 }
 
+/// Keyboard layout and repeat. Needed on a real TTY, where there is no host compositor to ask.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Input {
+    pub layout: String,
+    pub variant: String,
+    pub options: String,
+    pub repeat_delay: i32,
+    pub repeat_rate: i32,
+    pub tap_to_click: bool,
+    pub natural_scroll: bool,
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        Self {
+            layout: String::new(),
+            variant: String::new(),
+            options: String::new(),
+            repeat_delay: 200,
+            repeat_rate: 25,
+            tap_to_click: true,
+            natural_scroll: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct RawConfig {
     general: General,
+    input: Input,
     colors: Colors,
     autostart: Vec<String>,
     /// "mod+shift+1" = "move-to-workspace:1"; merged over the defaults, "none" removes a bind.
@@ -75,6 +103,7 @@ impl Binding {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub general: General,
+    pub input: Input,
     pub focused: Color32F,
     pub unfocused: Color32F,
     pub background: Color32F,
@@ -180,7 +209,7 @@ impl Config {
         }
 
         let general = General { gap: raw.general.gap.max(0), border: raw.general.border.max(0), ..raw.general };
-        (Self { general, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
+        (Self { general, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
     }
 }
 

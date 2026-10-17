@@ -12,6 +12,15 @@ border = 2            # focus border width (keep <= gap)
 terminal = "konsole"  # used by the plain `spawn` action
 modifier = "alt"      # "alt" while testing nested, "super" on a real session
 
+[input]
+layout = ""           # xkb layout, e.g. "pl" or "us,de" (empty = system default)
+variant = ""
+options = ""          # e.g. "caps:escape"
+repeat_delay = 200    # ms
+repeat_rate = 25      # keys/s
+tap_to_click = true   # touchpads (TTY session only)
+natural_scroll = false
+
 [colors]
 focused = "#73a6ff"
 unfocused = "#40455a"

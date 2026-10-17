@@ -360,3 +360,20 @@ impl State {
         }
     }
 }
+
+// ---- frame callbacks ----
+
+impl State {
+    /// Tell clients a frame was presented (drives their next redraw).
+    pub fn send_frames(&mut self, output: &smithay::output::Output, time: std::time::Duration) {
+        for window in self.space.elements() {
+            window.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));
+        }
+        for layer in layer_map_for_output(output).layers() {
+            layer.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));
+        }
+        self.space.refresh();
+        self.popups.cleanup();
+        layer_map_for_output(output).cleanup();
+    }
+}

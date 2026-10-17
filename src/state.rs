@@ -3,7 +3,7 @@
 use std::os::unix::io::OwnedFd;
 
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
+    backend::{renderer::utils::on_commit_buffer_handler, session::libseat::LibSeatSession},
     delegate_compositor, delegate_data_control, delegate_data_device, delegate_layer_shell, delegate_output,
     delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration,
     delegate_xdg_shell,
@@ -79,6 +79,12 @@ pub struct State {
     pub drag: Option<Drag>,
     pub output: Output,
     pub config: Config,
+    /// Present on a real (TTY) session: used for VT switching.
+    pub session: Option<LibSeatSession>,
+    /// Cursor requested by the focused client (drawn by the TTY backend).
+    pub cursor_status: CursorImageStatus,
+    /// Screenshot requested over the control socket; served by the backend after the next frame.
+    pub pending_shot: Option<(std::path::PathBuf, std::os::unix::net::UnixStream)>,
     pub running: bool,
 }
 
@@ -286,7 +292,9 @@ impl SeatHandler for State {
         set_primary_focus(&self.display_handle, seat, client);
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_status = image;
+    }
 }
 
 impl SelectionHandler for State {
