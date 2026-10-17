@@ -16,6 +16,7 @@ use std::{os::fd::{AsFd, BorrowedFd}, process::Stdio, sync::Arc, time::Duration}
 
 use smithay::{
     desktop::{PopupManager, Space},
+    reexports::calloop::timer::{TimeoutAction, Timer},
     utils::{Clock, ClockSource, Monotonic},
     xwayland::{X11Wm, XWayland, XWaylandEvent},
     reexports::{
@@ -259,6 +260,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // Let D-Bus-activated programs (portals, notification daemons) find this compositor.
         state.spawn("dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null");
+    }
+
+    // pywal: pick up a new palette when `wal` rewrites its colors.json (checked every 2 s, only
+    // while colors.pywal is on).
+    {
+        let mut seen: Option<Option<std::time::SystemTime>> = None; // None = not looked yet
+        handle.insert_source(Timer::from_duration(Duration::from_secs(2)), move |_, _, state| {
+            if let Some(path) = state.config.pywal_file.clone() {
+                let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                match seen {
+                    Some(previous) if previous != modified => {
+                        tracing::info!("pywal colours changed, reloading");
+                        state.reload_config();
+                        seen = Some(modified);
+                    }
+                    None => seen = Some(modified),
+                    _ => {}
+                }
+            } else {
+                seen = None;
+            }
+            TimeoutAction::ToDuration(Duration::from_secs(2))
+        })?;
     }
 
     for cmd in state.config.autostart.clone() {

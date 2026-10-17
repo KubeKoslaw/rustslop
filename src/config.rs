@@ -43,11 +43,59 @@ pub struct Colors {
     pub focused: String,
     pub unfocused: String,
     pub background: String,
+    /// Take the three colours from pywal's `colors.json` instead (the ones above are then the
+    /// fallback when the file is missing). Follows `wal -i ...` live.
+    pub pywal: bool,
+    /// Which pywal colour to use: `background`, `foreground`, `cursor` or `color0`..`color15`.
+    pub pywal_focused: String,
+    pub pywal_unfocused: String,
+    pub pywal_background: String,
 }
 
 impl Default for Colors {
     fn default() -> Self {
-        Self { focused: "#73a6ff".into(), unfocused: "#40455a".into(), background: "#14141f".into() }
+        Self {
+            focused: "#73a6ff".into(),
+            unfocused: "#40455a".into(),
+            background: "#14141f".into(),
+            pywal: false,
+            pywal_focused: "color4".into(),
+            pywal_unfocused: "color8".into(),
+            pywal_background: "background".into(),
+        }
+    }
+}
+
+/// pywal's `~/.cache/wal/colors.json` (`$RUSTED_WAL_FILE` overrides the location).
+pub fn wal_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("RUSTED_WAL_FILE") {
+        return p.into();
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(|| PathBuf::from(".cache"));
+    cache.join("wal").join("colors.json")
+}
+
+#[derive(Deserialize, Default)]
+struct WalFile {
+    #[serde(default)]
+    special: BTreeMap<String, String>,
+    #[serde(default)]
+    colors: BTreeMap<String, String>,
+}
+
+impl WalFile {
+    fn load(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("colors.pywal is on but {} cannot be read ({e}); run `wal -i IMAGE` first. Using the configured colours", path.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("{} is not a pywal colors.json: {e}", path.display()))
+    }
+
+    /// A pywal colour by name: background/foreground/cursor or colorN.
+    fn get(&self, name: &str) -> Option<&String> {
+        self.special.get(name).or_else(|| self.colors.get(name))
     }
 }
 
@@ -141,9 +189,52 @@ impl Default for Audio {
     }
 }
 
+/// Optional compositor effects. Defaults preserve the original rectangular appearance.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub corner_radius: i32,
+    pub shadow_enabled: bool,
+    pub shadow_size: i32,
+    pub shadow_opacity: f32,
+    pub blur_enabled: bool,
+    pub blur_radius: i32,
+    pub animations_enabled: bool,
+    pub animation_duration_ms: i32,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        Self { corner_radius: 0, shadow_enabled: false, shadow_size: 24, shadow_opacity: 0.24,
+            blur_enabled: false, blur_radius: 8, animations_enabled: false, animation_duration_ms: 180 }
+    }
+}
+impl Appearance {
+    pub fn enabled(&self) -> bool {
+        self.corner_radius > 0 || self.shadow_enabled || self.blur_enabled || self.animations_enabled
+    }
+    fn validate(&mut self, problems: &mut Vec<String>) {
+        for (name, value, lo, hi) in [
+            ("corner_radius", &mut self.corner_radius, 0, 64),
+            ("shadow_size", &mut self.shadow_size, 0, 64),
+            ("blur_radius", &mut self.blur_radius, 1, 32),
+            ("animation_duration_ms", &mut self.animation_duration_ms, 0, 1000),
+        ] {
+            if !(lo..=hi).contains(value) {
+                problems.push(format!("appearance.{name} is outside {lo}-{hi}, clamped"));
+                *value = (*value).clamp(lo, hi);
+            }
+        }
+        if !(0.0..=1.0).contains(&self.shadow_opacity) {
+            problems.push("appearance.shadow_opacity must be finite and within 0-1, using 0.24".into());
+            self.shadow_opacity = 0.24;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct RawConfig {
+    appearance: Appearance,
     audio: Audio,
     apps: Apps,
     general: General,
@@ -176,12 +267,15 @@ impl Binding {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub appearance: Appearance,
     pub general: General,
     pub audio: crate::audio::AudioSettings,
     pub input: Input,
     pub focused: Color32F,
     pub unfocused: Color32F,
     pub background: Color32F,
+    /// Set when the colours come from pywal: the file to watch for changes.
+    pub pywal_file: Option<PathBuf>,
     pub autostart: Vec<String>,
     pub bindings: Vec<Binding>,
 }
@@ -298,9 +392,29 @@ impl Config {
                 fallback
             })
         };
-        let focused = color("colors.focused", &raw.colors.focused, Color32F::new(0.45, 0.65, 1.0, 1.0));
-        let unfocused = color("colors.unfocused", &raw.colors.unfocused, Color32F::new(0.25, 0.27, 0.35, 1.0));
-        let background = color("colors.background", &raw.colors.background, Color32F::new(0.08, 0.08, 0.12, 1.0));
+        let mut focused = color("colors.focused", &raw.colors.focused, Color32F::new(0.45, 0.65, 1.0, 1.0));
+        let mut unfocused = color("colors.unfocused", &raw.colors.unfocused, Color32F::new(0.25, 0.27, 0.35, 1.0));
+        let mut background = color("colors.background", &raw.colors.background, Color32F::new(0.08, 0.08, 0.12, 1.0));
+
+        // pywal: its palette replaces the three colours (and is re-read when the file changes).
+        let mut pywal_file = None;
+        if raw.colors.pywal {
+            let path = wal_path();
+            match WalFile::load(&path) {
+                Ok(wal) => {
+                    let mut pick = |what: &str, wanted: &str, target: &mut Color32F| match wal.get(wanted).and_then(|h| parse_color(h)) {
+                        Some(c) => *target = c,
+                        None => problems.push(format!("colors.pywal_{what} = {wanted:?}: no such colour in {}", path.display())),
+                    };
+                    pick("focused", &raw.colors.pywal_focused, &mut focused);
+                    pick("unfocused", &raw.colors.pywal_unfocused, &mut unfocused);
+                    pick("background", &raw.colors.pywal_background, &mut background);
+                }
+                Err(e) => problems.push(e),
+            }
+            // Keep watching even when the file is missing now: `wal` may create it later.
+            pywal_file = Some(path);
+        }
 
         let super_mod = match raw.general.modifier.to_ascii_lowercase().as_str() {
             "super" | "logo" | "win" => true,
@@ -386,7 +500,9 @@ impl Config {
             max_volume: if (50..=150).contains(&raw.audio.max_volume) { raw.audio.max_volume } else { 100 },
             notify: raw.audio.notify,
         };
-        (Self { general, audio, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
+        let mut appearance = raw.appearance;
+        appearance.validate(&mut problems);
+        (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, bindings }, problems)
     }
 }
 
@@ -613,7 +729,8 @@ mod tests {
     #[test]
     fn schema_matches_config_structs() {
         use crate::schema::{keys_of, SETTINGS};
-        let sections: [(&str, toml::Value); 5] = [
+        let sections: [(&str, toml::Value); 6] = [
+            ("appearance", toml::Value::try_from(Appearance::default()).unwrap()),
             ("general", toml::Value::try_from(General::default()).unwrap()),
             ("apps", toml::Value::try_from(Apps::default()).unwrap()),
             ("input", toml::Value::try_from(Input::default()).unwrap()),
@@ -669,6 +786,48 @@ mod tests {
         let (c2, _) = Config::parse("[apps]\nlauncher = \"rofi -show drun\"", false);
         let d = c2.bindings.iter().find(|b| b.key == "mod+d").unwrap();
         assert!(matches!(&d.action, Action::Exec(cmd) if cmd == "rofi -show drun"));
+    }
+
+    #[test]
+    fn pywal_palette_replaces_the_colours() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("colors.json");
+        std::fs::write(
+            &file,
+            r##"{"wallpaper":"x.png","alpha":"100","special":{"background":"#0a0b0c","foreground":"#eeeeee","cursor":"#ffffff"},
+                "colors":{"color2":"#00ff00","color4":"#112233","color8":"#445566"}}"##,
+        )
+        .unwrap();
+        // Only this test sets the variable; every other test leaves pywal off and never reads it.
+        unsafe { std::env::set_var("RUSTED_WAL_FILE", &file) };
+        let rgb = |c: Color32F| ((c.r() * 255.0).round() as u8, (c.g() * 255.0).round() as u8, (c.b() * 255.0).round() as u8);
+
+        let (c, p) = Config::parse("[colors]\npywal = true", false);
+        assert!(p.is_empty(), "{p:?}");
+        assert_eq!(rgb(c.focused), (0x11, 0x22, 0x33));
+        assert_eq!(rgb(c.unfocused), (0x44, 0x55, 0x66));
+        assert_eq!(rgb(c.background), (0x0a, 0x0b, 0x0c));
+        assert_eq!(c.pywal_file.as_deref(), Some(file.as_path()));
+
+        // Choosing other pywal colours, and a name pywal does not have.
+        let (c, p) = Config::parse("[colors]\npywal = true\npywal_focused = \"color2\"\npywal_unfocused = \"color99\"", false);
+        assert_eq!(rgb(c.focused), (0, 255, 0));
+        assert!(p.iter().any(|m| m.contains("pywal_unfocused") && m.contains("color99")), "{p:?}");
+        // The configured colour is the fallback for that one.
+        assert_eq!(rgb(c.unfocused), (0x40, 0x45, 0x5a));
+
+        // pywal off: the configured colours, and nothing to watch.
+        let (c, _) = Config::parse("", false);
+        assert_eq!(rgb(c.focused), (0x73, 0xa6, 0xff));
+        assert!(c.pywal_file.is_none());
+
+        // A missing file is reported, the configured colours stay, and the path is still watched.
+        std::fs::remove_file(&file).unwrap();
+        let (c, p) = Config::parse("[colors]\npywal = true", false);
+        assert!(p.iter().any(|m| m.contains("wal -i")), "{p:?}");
+        assert_eq!(rgb(c.focused), (0x73, 0xa6, 0xff));
+        assert!(c.pywal_file.is_some());
+        unsafe { std::env::remove_var("RUSTED_WAL_FILE") };
     }
 
     #[test]

@@ -1,4 +1,9 @@
+/* pywal: uncomment to colour the bar from the current palette (pywal writes this file on every
+   `wal -i IMAGE`; it defines @background, @foreground, @color0 ... @color15). Waybar reloads its
+   style with `killall -SIGUSR2 waybar` -- better: run `pkill -USR2 waybar` from your wal hook. */
+/* @import url("file:///home/YOUR_USER/.cache/wal/colors-waybar.css"); */
 * { font-family: "Noto Sans", sans-serif; font-size: 13px; }
 window#waybar { background: rgba(20, 21, 30, 0.92); color: #cad3f5; }
+/* with the @import above:  window#waybar { background: @background; color: @foreground; } */
 #custom-workspaces, #clock, #cpu, #memory, #battery, #network, #pulseaudio, #tray { padding: 0 10px; }
 #clock { font-weight: bold; }

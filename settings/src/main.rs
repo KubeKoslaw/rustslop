@@ -16,6 +16,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("apps", "Default apps"),
     ("input", "Input"),
     ("colors", "Colors"),
+    ("appearance", "Appearance"),
     ("audio", "Audio"),
 ];
 

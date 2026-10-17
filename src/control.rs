@@ -87,6 +87,29 @@ impl State {
         let ok = || Reply::Text("ok".into());
 
         match parts.first().copied() {
+            Some("outputs-json") => {
+                let outputs: Vec<_> = self.outputs.iter().map(|m| {
+                    let g = self.space.output_geometry(&m.output).unwrap_or_default();
+                    let first = m.slot * crate::wm::WORKSPACE_COUNT;
+                    let workspaces: Vec<_> = (0..crate::wm::WORKSPACE_COUNT).map(|n| serde_json::json!({
+                        "number": n + 1, "active": first + n == m.ws,
+                        "windows": self.workspaces[first + n].entries.len()
+                    })).collect();
+                    serde_json::json!({"name": m.output.name(), "width": g.size.w, "height": g.size.h,
+                        "scale": m.output.current_scale().fractional_scale(), "workspaces": workspaces})
+                }).collect();
+                return Reply::Text(serde_json::to_string(&outputs).unwrap());
+            }
+            Some("ws-on") => {
+                let Some(mon) = parts.get(1).and_then(|name| self.outputs.iter().position(|m| m.output.name() == *name)) else {
+                    return err("ws-on OUTPUT N: unknown output");
+                };
+                let Some(n) = parts.get(2).and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=crate::wm::WORKSPACE_COUNT).contains(n)) else {
+                    return err("ws-on OUTPUT N: N must be 1-9");
+                };
+                if !self.locked { self.focus_output(mon); self.switch_workspace(n - 1); }
+            }
+
             Some("spawn") => {
                 let term = self.config.general.terminal.clone();
                 self.run_action(Action::Exec(term))
@@ -252,6 +275,17 @@ impl State {
         let focused = self.focused_window();
         let mut out = String::new();
         out += &format!("locked={}\n", self.locked);
+        let hex = |c: smithay::backend::renderer::Color32F| {
+            let b = |v: f32| (v * 255.0).round() as u8;
+            format!("#{:02x}{:02x}{:02x}", b(c.r()), b(c.g()), b(c.b()))
+        };
+        out += &format!(
+            "colors focused={} unfocused={} background={} pywal={}\n",
+            hex(self.config.focused),
+            hex(self.config.unfocused),
+            hex(self.config.background),
+            self.config.pywal_file.is_some()
+        );
         for (n, m) in self.outputs.iter().enumerate() {
             let o = self.space.output_geometry(&m.output).unwrap_or_default();
             out += &format!(

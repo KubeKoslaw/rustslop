@@ -29,6 +29,10 @@ cleanup() {
 trap cleanup EXIT
 
 cargo build -q --all-targets 2>&1 | tail -3
+# A fake pywal palette (colors.json format) for the pywal checks; pywal stays off until a check turns it on.
+mkdir -p "$OUT/wal"
+printf '{"special":{"background":"#0a0b0c","foreground":"#eeeeee","cursor":"#ffffff"},"colors":{"color2":"#00ff00","color4":"#112233","color8":"#445566"}}' > "$OUT/wal/colors.json"
+export RUSTED_WAL_FILE="$OUT/wal/colors.json"
 # Fake audio tools so the volume actions can be checked without touching real audio.
 mkdir -p "$OUT/fakebin"
 printf '#!/bin/sh\necho "$@" >> "%s/wpctl.log"\n[ "$1" = get-volume ] && echo "Volume: 0.55"\nexit 0\n' "$OUT" > "$OUT/fakebin/wpctl"
@@ -133,6 +137,18 @@ if [ -x target/debug/rusted-settings ]; then
   $CTL shot "$OUT/settings-gui.png" >/dev/null
   kill $GUIPID 2>/dev/null; sleep 1
 fi
+
+# ---- pywal colours ----
+colors_line() { $CTL info | grep '^colors '; }
+$CFG set colors.pywal true >/dev/null 2>&1
+check "pywal palette replaces the border and background colours" $(colors_line | grep -q "focused=#112233 unfocused=#445566 background=#0a0b0c pywal=true"; echo $?)
+sleep 1; printf '{"special":{"background":"#010203"},"colors":{"color4":"#aabbcc","color8":"#445566"}}' > "$OUT/wal/colors.json"; sleep 5
+check "a new pywal palette is picked up without a reload" $(colors_line | grep -q "focused=#aabbcc .*background=#010203"; echo $?)
+$CFG set colors.pywal_focused color8 >/dev/null 2>&1
+check "pywal_focused chooses another pywal colour" $(colors_line | grep -q "focused=#445566"; echo $?)
+$CFG unset colors.pywal_focused >/dev/null 2>&1; $CFG set colors.pywal false >/dev/null 2>&1
+check "pywal off restores the configured colours" $(colors_line | grep -q "focused=#73a6ff .*pywal=false"; echo $?)
+$CFG unset colors.pywal >/dev/null 2>&1
 
 # ---- audio actions (fake wpctl / notify-send) ----
 $CTL volume up >/dev/null; sleep 1

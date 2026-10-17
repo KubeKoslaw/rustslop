@@ -35,7 +35,22 @@ const fn s(section: &'static str, key: &'static str, kind: Kind, default: &'stat
     Setting { section, key, kind, default, description, restart }
 }
 
+/// Names in pywal's colors.json.
+const PYWAL_COLORS: &[&str] = &[
+    "background", "foreground", "cursor", "color0", "color1", "color2", "color3", "color4", "color5", "color6", "color7",
+    "color8", "color9", "color10", "color11", "color12", "color13", "color14", "color15",
+];
+
 pub const SETTINGS: &[Setting] = &[
+    s("appearance", "corner_radius", Kind::Int { min: 0, max: 64 }, "0", "Window corner radius in logical pixels; 0 disables rounding.", false),
+    s("appearance", "shadow_enabled", Kind::Bool, "false", "Draw soft shadows behind windows.", false),
+    s("appearance", "shadow_size", Kind::Int { min: 0, max: 64 }, "24", "Shadow extent in logical pixels.", false),
+    s("appearance", "shadow_opacity", Kind::Float { min: 0.0, max: 1.0 }, "0.24", "Maximum shadow opacity.", false),
+    s("appearance", "blur_enabled", Kind::Bool, "false", "Blur behind translucent desktop panels and foot terminals.", false),
+    s("appearance", "blur_radius", Kind::Int { min: 1, max: 32 }, "8", "Backdrop blur radius in logical pixels.", false),
+    s("appearance", "animations_enabled", Kind::Bool, "false", "Animate window opening, closing, layout and workspace changes.", false),
+    s("appearance", "animation_duration_ms", Kind::Int { min: 0, max: 1000 }, "180", "Layout animation duration; 0 disables motion.", false),
+
     s("", "autostart", Kind::List, "[]", "Programs started once when the compositor starts (run through `sh -c`).", true),
     s("", "keybinds", Kind::Map, "{}", "Key combination -> action, merged over the defaults; \"none\" removes a default.", false),
     s("general", "gap", Kind::Int { min: 0, max: 200 }, "12", "Pixels between windows and screen edges.", false),
@@ -62,13 +77,17 @@ pub const SETTINGS: &[Setting] = &[
     s("colors", "focused", Kind::Color, "\"#73a6ff\"", "Border colour of the focused window.", false),
     s("colors", "unfocused", Kind::Color, "\"#40455a\"", "Border colour of other windows.", false),
     s("colors", "background", Kind::Color, "\"#14141f\"", "Desktop background colour.", false),
+    s("colors", "pywal", Kind::Bool, "false", "Take the colours from pywal (~/.cache/wal/colors.json); follows `wal -i` live.", false),
+    s("colors", "pywal_focused", Kind::Choice(PYWAL_COLORS), "\"color4\"", "pywal colour used for the focused border.", false),
+    s("colors", "pywal_unfocused", Kind::Choice(PYWAL_COLORS), "\"color8\"", "pywal colour used for other borders.", false),
+    s("colors", "pywal_background", Kind::Choice(PYWAL_COLORS), "\"background\"", "pywal colour used for the desktop background.", false),
     s("audio", "step", Kind::Int { min: 1, max: 50 }, "5", "Percent per volume key press.", false),
     s("audio", "max_volume", Kind::Int { min: 50, max: 150 }, "100", "Volume limit in percent (above 100 = software boost).", false),
     s("audio", "notify", Kind::Bool, "true", "Show the new level with notify-send (needs mako/dunst).", false),
 ];
 
 /// Names of the tables that exist (everything in SETTINGS with a non-empty section).
-pub const SECTIONS: &[&str] = &["general", "apps", "input", "colors", "audio"];
+pub const SECTIONS: &[&str] = &["general", "apps", "input", "colors", "audio", "appearance"];
 
 /// Keys accepted in `section` ("" = top level, where the sections themselves are accepted too).
 pub fn keys_of(section: &str) -> Vec<&'static str> {

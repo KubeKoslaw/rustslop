@@ -12,7 +12,7 @@ autostart = [
   "sh -c 'pgrep -x pipewire >/dev/null || pipewire'",
   "sh -c 'pgrep -x wireplumber >/dev/null || wireplumber'",
   "sh -c 'pgrep -x pipewire-pulse >/dev/null || pipewire-pulse'",
-  "swaybg -c '#1e2030'",
+  "swaybg -i \"$HOME/.config/rusted-rice/wallpapers/nixos.png\" -m fill",
   "rusted-waybar",   # one bar per monitor, each with its own workspaces (plain "waybar" works too)
   "mako",
   "wl-paste --watch cliphist store",
@@ -31,8 +31,13 @@ terminal = "foot"
 launcher = "fuzzel"
 browser = "firefox"
 file_manager = "dolphin"
-lock = "swaylock -f -c 000000"
+lock = "swaylock -f -i ~/.config/rusted-rice/wallpapers/lock.png"
 settings = "rusted-settings"
+
+[colors]
+# pywal = true            # border + background colours from `wal -i IMAGE` (live)
+# pywal_focused = "color4"
+# pywal_unfocused = "color8"
 
 [audio]
 step = 5
@@ -60,3 +65,19 @@ mouse_natural_scroll = false  # mice keep the normal wheel direction
 # multi-monitor: send the focused window to the monitor on the left/right
 "mod+shift+comma" = "move-to-output-left"
 "mod+shift+period" = "move-to-output-right"
+
+[colors]
+focused = "#B4A1F5"
+unfocused = "#383C50"
+background = "#14151D"
+pywal = false
+
+[appearance]
+corner_radius = 14
+shadow_enabled = true
+shadow_size = 24
+shadow_opacity = 0.24
+blur_enabled = true
+blur_radius = 8
+animations_enabled = true
+animation_duration_ms = 180

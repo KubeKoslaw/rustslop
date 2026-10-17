@@ -40,6 +40,13 @@ mouse_natural_scroll = false  # mice (wheel direction); leave false for the usua
 focused = "#73a6ff"
 unfocused = "#40455a"
 background = "#14141f"
+# pywal: use the palette from ~/.cache/wal/colors.json for the three colours above. The compositor
+# notices when `wal -i IMAGE` writes a new one (within a couple of seconds) and recolours.
+# Choose which pywal colour goes where: background, foreground, cursor or color0..color15.
+pywal = false
+pywal_focused = "color4"
+pywal_unfocused = "color8"
+pywal_background = "background"
 
 # Volume/mute actions (volume-up, volume-down, volume-mute, mic-mute) are bound to the XF86Audio*
 # keys by default, so media keys and keyboard knobs work out of the box. Uses wpctl (PipeWire),
@@ -57,3 +64,14 @@ notify = true       # show the new level with notify-send (needs mako/dunst)
 # "mod+d" = "spawn:fuzzel"
 # "mod+shift+q" = "close"
 # "mod+tab" = "none"
+
+# Optional effects (live reload; off by default for compatibility).
+[appearance]
+corner_radius = 0
+shadow_enabled = false
+shadow_size = 24
+shadow_opacity = 0.24
+blur_enabled = false
+blur_radius = 8
+animations_enabled = false
+animation_duration_ms = 180
