@@ -27,7 +27,9 @@ use smithay::{
             xdg::{decoration::XdgDecorationState, XdgShellState},
         },
         shm::ShmState,
+        cursor_shape::CursorShapeManagerState,
         viewporter::ViewporterState,
+        xdg_activation::XdgActivationState,
     },
 };
 
@@ -79,6 +81,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shm_state: ShmState::new::<State>(&dh, vec![]),
         output_manager_state: OutputManagerState::new_with_xdg_output::<State>(&dh),
         viewporter_state: ViewporterState::new::<State>(&dh),
+        cursor_shape_state: CursorShapeManagerState::new::<State>(&dh),
+        xdg_activation_state: XdgActivationState::new::<State>(&dh),
         seat_state,
         data_device_state: DataDeviceState::new::<State>(&dh),
         primary_selection_state,

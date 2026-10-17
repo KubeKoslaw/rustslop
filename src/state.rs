@@ -4,11 +4,12 @@ use std::os::unix::io::OwnedFd;
 
 use smithay::{
     backend::{renderer::utils::on_commit_buffer_handler, session::libseat::LibSeatSession},
-    delegate_compositor, delegate_data_control, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration,
+    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
+    wayland::tablet_manager::TabletSeatHandler,
     output::Output,
     reexports::{
         wayland_protocols::xdg::{
@@ -46,6 +47,8 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         viewporter::ViewporterState,
+        xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
+        cursor_shape::CursorShapeManagerState,
     },
 };
 
@@ -66,6 +69,9 @@ pub struct State {
     pub output_manager_state: OutputManagerState,
     #[allow(dead_code)] // keeps the viewporter global alive
     pub viewporter_state: ViewporterState,
+    #[allow(dead_code)] // keeps the cursor-shape global alive
+    pub cursor_shape_state: CursorShapeManagerState,
+    pub xdg_activation_state: XdgActivationState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
@@ -326,6 +332,28 @@ impl SeatHandler for State {
     }
 }
 
+/// A client asked to be focused (e.g. a launched app, or a notification click). Only tokens that
+/// came from a user input event and are recent are honoured, so apps cannot steal focus on their own.
+impl XdgActivationHandler for State {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData, surface: WlSurface) {
+        if data.serial.is_none() || data.timestamp.elapsed().as_secs() >= 10 {
+            tracing::debug!("ignoring activation request without a fresh input serial");
+            return;
+        }
+        let Some(window) = self.window_for_surface(&surface) else { return };
+        if let Some(ws) = self.workspaces.iter().position(|ws| ws.entries.iter().any(|e| e.window == window)) {
+            self.switch_workspace(ws);
+            self.focus_window(&window);
+        }
+    }
+}
+
+impl TabletSeatHandler for State {}
+
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -357,6 +385,8 @@ delegate_compositor!(State);
 delegate_shm!(State);
 delegate_output!(State);
 delegate_viewporter!(State);
+delegate_cursor_shape!(State);
+delegate_xdg_activation!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);
 delegate_layer_shell!(State);

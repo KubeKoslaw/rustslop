@@ -1,9 +1,10 @@
 //! Software cursor image for the TTY backend (the nested backend uses the host cursor).
 
-use std::fs;
+use std::{collections::HashMap, fs};
 
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
+    input::pointer::CursorIcon,
     utils::{Physical, Point, Transform},
 };
 
@@ -12,20 +13,47 @@ pub struct CursorImage {
     pub hotspot: Point<i32, Physical>,
 }
 
-impl CursorImage {
-    /// Load the default cursor from the XCursor theme (`$XCURSOR_THEME`, `$XCURSOR_SIZE`), or draw a
-    /// simple arrow if no theme is installed.
+/// Named cursors (cursor-shape-v1 and plain `Named` requests) from the XCursor theme
+/// (`$XCURSOR_THEME`, `$XCURSOR_SIZE`), loaded lazily. Shapes the theme lacks fall back to the
+/// default arrow, which in turn falls back to a built-in drawing.
+pub struct CursorTheme {
+    theme: xcursor::CursorTheme,
+    size: u32,
+    cache: HashMap<CursorIcon, CursorImage>,
+    fallback: CursorImage,
+}
+
+impl CursorTheme {
     pub fn load() -> Self {
-        let theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
+        let name = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
         let size: u32 = std::env::var("XCURSOR_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
-        Self::from_theme(&theme, size).unwrap_or_else(|| {
-            tracing::warn!("no xcursor theme {theme:?} found, using a built-in cursor");
-            Self::fallback()
-        })
+        let theme = xcursor::CursorTheme::load(&name);
+        let fallback = CursorImage::from_theme(&theme, "default", size).unwrap_or_else(|| {
+            tracing::warn!("no xcursor theme {name:?} found, using a built-in cursor");
+            CursorImage::fallback()
+        });
+        Self { theme, size, cache: HashMap::new(), fallback }
     }
 
-    fn from_theme(theme: &str, size: u32) -> Option<Self> {
-        let path = xcursor::CursorTheme::load(theme).load_icon("default")?;
+    pub fn get(&mut self, icon: CursorIcon) -> &CursorImage {
+        if !self.cache.contains_key(&icon) {
+            let found = std::iter::once(icon.name())
+                .chain(icon.alt_names().iter().copied())
+                .find_map(|n| CursorImage::from_theme(&self.theme, n, self.size));
+            match found {
+                Some(image) => {
+                    self.cache.insert(icon, image);
+                }
+                None => return &self.fallback,
+            }
+        }
+        &self.cache[&icon]
+    }
+}
+
+impl CursorImage {
+    fn from_theme(theme: &xcursor::CursorTheme, name: &str, size: u32) -> Option<Self> {
+        let path = theme.load_icon(name)?;
         let images = xcursor::parser::parse_xcursor(&fs::read(path).ok()?)?;
         let image = images.iter().min_by_key(|i| (size as i32 - i.size as i32).abs())?;
         // xcursor stores RGBA; Argb8888 in memory (little endian) is B, G, R, A.

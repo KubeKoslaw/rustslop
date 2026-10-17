@@ -10,7 +10,13 @@ pass=0; fail=0
 check() { # name, condition-exit-status
   if [ "$2" -eq 0 ]; then echo "PASS $1"; pass=$((pass+1)); else echo "FAIL $1"; fail=$((fail+1)); fi
 }
-cleanup() { $CTL quit >/dev/null 2>&1; sleep 1; pkill -x rusted-wm 2>/dev/null; pkill -x konsole 2>/dev/null; pkill -x layer_client 2>/dev/null; }
+# Only kill terminals that connected to OUR compositor (WAYLAND_DISPLAY=rusted-*), never the user's own.
+kill_test_terminals() {
+  for p in $(pgrep -x konsole); do
+    tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -q '^WAYLAND_DISPLAY=rusted-' && kill $p
+  done
+}
+cleanup() { $CTL quit >/dev/null 2>&1; sleep 1; pkill -x rusted-wm 2>/dev/null; kill_test_terminals; pkill -x layer_client 2>/dev/null; }
 trap cleanup EXIT
 
 cargo build -q --all-targets 2>&1 | tail -3

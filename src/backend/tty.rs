@@ -51,7 +51,7 @@ use smithay::{
     wayland::compositor::with_states,
 };
 
-use crate::{control, cursor::CursorImage, state::State};
+use crate::{control, cursor::CursorTheme, state::State};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Xrgb8888, Fourcc::Argb8888];
@@ -75,7 +75,7 @@ struct Gpu {
     drm: DrmDevice,
     compositor: Compositor,
     renderer: GlesRenderer,
-    cursor: CursorImage,
+    cursor: CursorTheme,
     frame_pending: bool,
     active: bool,
 }
@@ -180,7 +180,7 @@ impl Tty {
             session_notifier,
             seat_name,
             drm_notifier,
-            gpu: Gpu { drm, compositor, renderer, cursor: CursorImage::load(), frame_pending: false, active: true },
+            gpu: Gpu { drm, compositor, renderer, cursor: CursorTheme::load(), frame_pending: false, active: true },
             output,
         })
     }
@@ -292,12 +292,13 @@ fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
                     .map(TtyElement::Surface),
             );
         }
-        CursorImageStatus::Named(_) => {
+        CursorImageStatus::Named(icon) => {
+            let image = gpu.cursor.get(*icon);
             let at = Point::<f64, Physical>::from((
-                pointer.x - gpu.cursor.hotspot.x as f64,
-                pointer.y - gpu.cursor.hotspot.y as f64,
+                pointer.x - image.hotspot.x as f64,
+                pointer.y - image.hotspot.y as f64,
             ));
-            match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, at, &gpu.cursor.buffer, None, None, None, Kind::Cursor) {
+            match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, at, &image.buffer, None, None, None, Kind::Cursor) {
                 Ok(e) => elements.push(TtyElement::Memory(e)),
                 Err(e) => tracing::warn!("cursor render: {e}"),
             }
