@@ -98,6 +98,16 @@ impl State {
                 }
             }
             Some("exec") if parts.len() > 1 => self.spawn(&parts[1..].join(" ")),
+            Some("volume") => {
+                use crate::audio::AudioCmd::*;
+                match parts.get(1).copied() {
+                    Some("up") => self.run_action(Action::Audio(VolumeUp)),
+                    Some("down") => self.run_action(Action::Audio(VolumeDown)),
+                    Some("mute") => self.run_action(Action::Audio(VolumeMute)),
+                    Some("mic-mute") => self.run_action(Action::Audio(MicMute)),
+                    _ => return err("volume up|down|mute|mic-mute"),
+                }
+            }
             Some("close") => self.run_action(Action::Close),
             Some("next") => self.run_action(Action::FocusNext),
             Some("float") => self.run_action(Action::ToggleFloating),
@@ -179,7 +189,7 @@ impl State {
                 _ => return err("mvout h|j|k|l"),
             },
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N|next|prev, ws-json [OUTPUT], mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, volume up|down|mute|mic-mute, ws N|next|prev, ws-json [OUTPUT], mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
         }
         ok()
     }

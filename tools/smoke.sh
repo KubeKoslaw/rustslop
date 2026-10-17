@@ -29,6 +29,12 @@ cleanup() {
 trap cleanup EXIT
 
 cargo build -q --all-targets 2>&1 | tail -3
+# Fake audio tools so the volume actions can be checked without touching real audio.
+mkdir -p "$OUT/fakebin"
+printf '#!/bin/sh\necho "$@" >> "%s/wpctl.log"\n[ "$1" = get-volume ] && echo "Volume: 0.55"\nexit 0\n' "$OUT" > "$OUT/fakebin/wpctl"
+printf '#!/bin/sh\necho "$@" >> "%s/notify.log"\n' "$OUT" > "$OUT/fakebin/notify-send"
+chmod +x "$OUT/fakebin/wpctl" "$OUT/fakebin/notify-send"; rm -f "$OUT/wpctl.log" "$OUT/notify.log"
+export PATH="$OUT/fakebin:$PATH"
 RUSTED_CONFIG="$OUT/config.toml" RUST_LOG=info ./target/debug/rusted-wm ${RUSTED_BACKEND---headless} >"$OUT/wm.log" 2>&1 &
 WMPID=$!
 for _ in $(seq 1 50); do
@@ -102,6 +108,15 @@ check "reload reports an unknown config key with a hint" $($CTL reload | grep -q
 check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)
 $CTL ws next >/dev/null; check "ws next goes to workspace 2" $($CTL info | grep -q "current_ws=2"; echo $?)
 $CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "current_ws=1"; echo $?)
+
+# ---- audio actions (fake wpctl / notify-send) ----
+$CTL volume up >/dev/null; sleep 1
+check "volume up calls wpctl set-volume with the step" $(grep -q "set-volume -l 1.00 @DEFAULT_AUDIO_SINK@ 5%+" "$OUT/wpctl.log"; echo $?)
+check "volume up shows the new level" $(grep -q "Volume 55%" "$OUT/notify.log"; echo $?)
+$CTL volume down >/dev/null; $CTL volume mute >/dev/null; $CTL volume mic-mute >/dev/null; sleep 1
+check "volume down uses the negative step" $(grep -q "set-volume @DEFAULT_AUDIO_SINK@ 5%-" "$OUT/wpctl.log"; echo $?)
+check "mute toggles the sink" $(grep -q "set-mute @DEFAULT_AUDIO_SINK@ toggle" "$OUT/wpctl.log"; echo $?)
+check "mic-mute toggles the source" $(grep -q "set-mute @DEFAULT_AUDIO_SOURCE@ toggle" "$OUT/wpctl.log"; echo $?)
 
 # ---- wlr-screencopy (stand-in for grim) ----
 WAYLAND_DISPLAY=$SOCK timeout 20 ./target/debug/examples/screencopy_client "$OUT/copy.png" >"$OUT/copy.log" 2>&1

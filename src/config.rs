@@ -78,9 +78,28 @@ impl Default for Input {
     }
 }
 
+/// Volume / mute actions (`volume-up`, `volume-down`, `volume-mute`, `mic-mute`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Audio {
+    /// Percent per key press.
+    pub step: u32,
+    /// Limit in percent; above 100 is software boost.
+    pub max_volume: u32,
+    /// Show a notification with the new level.
+    pub notify: bool,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Self { step: 5, max_volume: 100, notify: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct RawConfig {
+    audio: Audio,
     general: General,
     input: Input,
     colors: Colors,
@@ -112,6 +131,7 @@ impl Binding {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub general: General,
+    pub audio: crate::audio::AudioSettings,
     pub input: Input,
     pub focused: Color32F,
     pub unfocused: Color32F,
@@ -144,6 +164,15 @@ const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+shift+f", "toggle-fullscreen"),
     ("mod+shift+e", "quit"),
     ("mod+shift+r", "reload"),
+    // Media keys and keyboard knobs work without any config.
+    ("XF86AudioRaiseVolume", "volume-up"),
+    ("XF86AudioLowerVolume", "volume-down"),
+    ("XF86AudioMute", "volume-mute"),
+    ("XF86AudioMicMute", "mic-mute"),
+    ("XF86AudioPlay", "spawn:playerctl play-pause"),
+    ("XF86AudioPause", "spawn:playerctl pause"),
+    ("XF86AudioNext", "spawn:playerctl next"),
+    ("XF86AudioPrev", "spawn:playerctl previous"),
     ("mod+1", "workspace:1"),
     ("mod+2", "workspace:2"),
     ("mod+3", "workspace:3"),
@@ -295,12 +324,24 @@ impl Config {
             scale: (raw.general.scale.clamp(0.5, 4.0) * 120.0).round() / 120.0,
             ..raw.general
         };
-        (Self { general, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
+        if raw.audio.step == 0 || raw.audio.step > 50 {
+            problems.push(format!("audio.step {} is outside 1-50, using 5", raw.audio.step));
+        }
+        if !(50..=150).contains(&raw.audio.max_volume) {
+            problems.push(format!("audio.max_volume {} is outside 50-150, using 100", raw.audio.max_volume));
+        }
+        let audio = crate::audio::AudioSettings {
+            step: if (1..=50).contains(&raw.audio.step) { raw.audio.step } else { 5 },
+            max_volume: if (50..=150).contains(&raw.audio.max_volume) { raw.audio.max_volume } else { 100 },
+            notify: raw.audio.notify,
+        };
+        (Self { general, audio, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
     }
 }
 
 /// Keys each section accepts. A unit test checks these against `config.example.toml`.
-const TOP_KEYS: &[&str] = &["general", "input", "colors", "autostart", "keybinds"];
+const TOP_KEYS: &[&str] = &["general", "input", "colors", "audio", "autostart", "keybinds"];
+const AUDIO_KEYS: &[&str] = &["step", "max_volume", "notify"];
 const GENERAL_KEYS: &[&str] = &["gap", "border", "terminal", "split_ratio", "modifier", "scale", "xwayland"];
 const INPUT_KEYS: &[&str] = &["layout", "variant", "options", "repeat_delay", "repeat_rate", "tap_to_click", "natural_scroll"];
 const COLORS_KEYS: &[&str] = &["focused", "unfocused", "background"];
@@ -330,7 +371,8 @@ fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
 /// Report every key the parser would silently ignore.
 fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
     let mut problems = Vec::new();
-    let sections: [(&str, &[&str]); 3] = [("general", GENERAL_KEYS), ("input", INPUT_KEYS), ("colors", COLORS_KEYS)];
+    let sections: [(&str, &[&str]); 4] =
+        [("general", GENERAL_KEYS), ("input", INPUT_KEYS), ("colors", COLORS_KEYS), ("audio", AUDIO_KEYS)];
     // Where a known key really lives, to say so when it is in the wrong place.
     let home = |key: &str| -> Option<String> {
         if TOP_KEYS.contains(&key) {
@@ -442,6 +484,10 @@ fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
         "move-to-output-right" => Action::MoveToOutput(1, 0),
         "move-to-output-up" => Action::MoveToOutput(0, -1),
         "move-to-output-down" => Action::MoveToOutput(0, 1),
+        "volume-up" => Action::Audio(crate::audio::AudioCmd::VolumeUp),
+        "volume-down" => Action::Audio(crate::audio::AudioCmd::VolumeDown),
+        "volume-mute" => Action::Audio(crate::audio::AudioCmd::VolumeMute),
+        "mic-mute" => Action::Audio(crate::audio::AudioCmd::MicMute),
         "grow" => Action::Resize(0.05),
         "shrink" => Action::Resize(-0.05),
         "workspace" => Action::Workspace(ws(arg)?),
@@ -492,7 +538,7 @@ mod tests {
     #[test]
     fn key_lists_match_the_example_config() {
         let example = include_str!("../config.example.toml");
-        for key in GENERAL_KEYS.iter().chain(INPUT_KEYS).chain(COLORS_KEYS) {
+        for key in GENERAL_KEYS.iter().chain(INPUT_KEYS).chain(COLORS_KEYS).chain(AUDIO_KEYS) {
             assert!(example.contains(&format!("{key} =")), "config.example.toml does not document `{key}`");
         }
         // And the shipped examples produce no unknown-key complaints.
@@ -537,7 +583,7 @@ mod tests {
     fn modifier_auto_follows_session_kind() {
         let ret = |real| {
             let (c, _) = Config::parse("", real);
-            let b = c.bindings.iter().find(|b| matches!(&b.action, Action::Exec(_))).unwrap();
+            let b = c.bindings.iter().find(|b| matches!(&b.action, Action::Exec(_)) && (b.logo || b.alt)).unwrap();
             (b.logo, b.alt)
         };
         assert_eq!(ret(false), (false, true)); // nested: Alt

@@ -1,3 +1,4 @@
+mod audio;
 mod backend;
 mod config;
 mod control;

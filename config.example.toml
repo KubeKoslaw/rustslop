@@ -29,10 +29,18 @@ focused = "#73a6ff"
 unfocused = "#40455a"
 background = "#14141f"
 
+# Volume/mute actions (volume-up, volume-down, volume-mute, mic-mute) are bound to the XF86Audio*
+# keys by default, so media keys and keyboard knobs work out of the box. Uses wpctl (PipeWire),
+# falling back to pactl. Run with RUST_LOG=debug to see every key press if a key does nothing.
+[audio]
+step = 5            # percent per key press
+max_volume = 100    # limit in percent (up to 150 = software boost)
+notify = true       # show the new level with notify-send (needs mako/dunst)
+
 # Merged over the defaults. "mod" is the modifier above. Use "none" to remove a default bind.
 # Actions: spawn, spawn:CMD ARGS, close, focus-next, focus-left/right/up/down, toggle-floating,
 #          swap-left/right/up/down, move-to-output-left/right/up/down, grow, shrink, toggle-fullscreen,
-#          workspace:N, move-to-workspace:N (N = 1-9), reload, quit
+#          workspace:N, move-to-workspace:N (N = 1-9), volume-up/down/mute, mic-mute, reload, quit
 [keybinds]
 # "mod+d" = "spawn:fuzzel"
 # "mod+shift+q" = "close"

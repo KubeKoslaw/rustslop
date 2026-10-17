@@ -36,6 +36,7 @@ pub enum Action {
     Workspace(usize),
     MoveToWorkspace(usize),
     SwitchVt(i32),
+    Audio(crate::audio::AudioCmd),
     Quit,
 }
 
@@ -93,12 +94,19 @@ impl State {
                 // Raw (unshifted) symbol, so e.g. Shift+1 is still "1".
                 let sym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or(handle.modified_sym()).raw();
                 let sym = normalize_sym(sym);
+                let key_name = smithay::input::keyboard::xkb::keysym_get_name(smithay::input::keyboard::Keysym::new(sym));
+                tracing::debug!(key = %key_name, ?mods, "key pressed");
                 // Keybinds are off while the session is locked (only VT switching above works).
                 if state.locked {
                     return FilterResult::Forward;
                 }
                 if let Some(b) = state.config.bindings.iter().find(|b| b.matches(mods, sym)) {
                     return FilterResult::Intercept(b.action.clone());
+                }
+                // Media keys that nothing is bound to: say so, it is the first thing to check when
+                // a knob or key "does nothing".
+                if key_name.starts_with("XF86") {
+                    tracing::info!(key = %key_name, "unbound media key (bind it in [keybinds])");
                 }
             }
             FilterResult::Forward
@@ -129,6 +137,7 @@ impl State {
             Action::Resize(delta) => self.adjust_ratio(delta),
             Action::Workspace(n) => self.switch_workspace(n),
             Action::MoveToWorkspace(n) => self.move_to_workspace(n),
+            Action::Audio(cmd) => crate::audio::run(cmd, self.config.audio.clone()),
             Action::SwitchVt(vt) => {
                 if let Some(session) = &mut self.session {
                     if let Err(e) = session.change_vt(vt) {

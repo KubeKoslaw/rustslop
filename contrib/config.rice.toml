@@ -2,12 +2,16 @@
 #   mkdir -p ~/.config/rusted-wm ~/.config/waybar
 #   cp contrib/config.rice.toml ~/.config/rusted-wm/config.toml
 #   cp contrib/waybar/* ~/.config/waybar/
-# Needs: waybar, mako, swaybg, foot, fuzzel; optional: grim + slurp (screenshots),
+# Needs: pipewire + wireplumber (+ pipewire-pulse), waybar, mako, swaybg, foot, fuzzel; optional: grim + slurp (screenshots),
 # swaylock + swayidle (lock/idle), cliphist + wl-clipboard (clipboard history),
-# brightnessctl, playerctl, wireplumber (wpctl).
+# brightnessctl, playerctl.
 
 # Started once, through `sh -c` (so $HOME works).
 autostart = [
+  # Audio daemons: nothing starts them on a bare TTY (KDE did it for you). Skipped when already running.
+  "sh -c 'pgrep -x pipewire >/dev/null || pipewire'",
+  "sh -c 'pgrep -x wireplumber >/dev/null || wireplumber'",
+  "sh -c 'pgrep -x pipewire-pulse >/dev/null || pipewire-pulse'",
   "swaybg -c '#1e2030'",
   "waybar",
   "mako",
@@ -22,6 +26,11 @@ gap = 12
 border = 2
 modifier = "auto"   # super on a real session, alt when nested
 # scale = 1.0
+
+[audio]
+step = 5
+max_volume = 100
+notify = true
 
 [input]
 # layout = "pl"     # keyboard layout: set this on a real TTY!
@@ -40,15 +49,9 @@ natural_scroll = true
 # screenshots (grim + slurp): region to clipboard, whole screen to ~/Pictures
 "mod+shift+s" = "spawn:sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
 "Print" = "spawn:sh -c 'mkdir -p ~/Pictures && grim ~/Pictures/$(date +%F_%H-%M-%S).png'"
-# audio (wireplumber), brightness, media
-"XF86AudioRaiseVolume" = "spawn:wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"
-"XF86AudioLowerVolume" = "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
-"XF86AudioMute" = "spawn:wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+# brightness (volume + media keys are built in: see [audio] and the XF86Audio* defaults)
 "XF86MonBrightnessUp" = "spawn:brightnessctl set 10%+"
 "XF86MonBrightnessDown" = "spawn:brightnessctl set 10%-"
-"XF86AudioPlay" = "spawn:playerctl play-pause"
-"XF86AudioNext" = "spawn:playerctl next"
-"XF86AudioPrev" = "spawn:playerctl previous"
 # multi-monitor: send the focused window to the monitor on the left/right
 "mod+shift+comma" = "move-to-output-left"
 "mod+shift+period" = "move-to-output-right"
