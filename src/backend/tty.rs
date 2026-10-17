@@ -259,6 +259,15 @@ impl Tty {
 
 /// Draw and queue one frame if the GPU is ours and idle.
 fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
+    // Screenshots are rendered offscreen, so they work even while another VT is in front.
+    if let Some((path, stream)) = state.pending_shot.take() {
+        let borders = state.border_elements();
+        let reply = match super::screenshot(&mut gpu.renderer, output, &state.space, &borders, state.config.background, &path) {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("error: {e}"),
+        };
+        control::answer(stream, &reply);
+    }
     if !gpu.active || gpu.frame_pending {
         return;
     }
@@ -314,12 +323,4 @@ fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
 
     state.send_frames(output, std::time::UNIX_EPOCH.elapsed().unwrap_or_default());
     let _ = state.display_handle.flush_clients();
-
-    if let Some((path, stream)) = state.pending_shot.take() {
-        let reply = match super::screenshot(&mut gpu.renderer, output, &state.space, &borders, background, &path) {
-            Ok(()) => "ok".to_string(),
-            Err(e) => format!("error: {e}"),
-        };
-        control::answer(stream, &reply);
-    }
 }
