@@ -2,10 +2,11 @@
 {
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/master/doc/json_schema.json",
   "logo": {
-    "type": "file",
-    "source": "~/.config/fastfetch/logo.txt",
+    // Truecolor half-block portrait of the Rusted mascot. `logo.txt` holds the braille emblem
+    // variant: switch `type` to "file" and `source` to ~/.config/fastfetch/logo.txt to use it.
+    "type": "file-raw",
+    "source": "~/.config/fastfetch/logo.ansi",
     "padding": { "top": 0, "left": 0, "right": 2 },
-    "color": { "1": "magenta", "2": "blue" },
     "position": "left"
   },
   "display": {
