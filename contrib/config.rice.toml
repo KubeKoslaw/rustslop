@@ -1,0 +1,54 @@
+# Ready-to-use rice config for rusted-wm. Copy to ~/.config/rusted-wm/config.toml:
+#   mkdir -p ~/.config/rusted-wm ~/.config/waybar
+#   cp contrib/config.rice.toml ~/.config/rusted-wm/config.toml
+#   cp contrib/waybar/* ~/.config/waybar/
+# Needs: waybar, mako, swaybg, foot, fuzzel; optional: grim + slurp (screenshots),
+# swaylock + swayidle (lock/idle), cliphist + wl-clipboard (clipboard history),
+# brightnessctl, playerctl, wireplumber (wpctl).
+
+# Started once, through `sh -c` (so $HOME works).
+autostart = [
+  "swaybg -c '#1e2030'",
+  "waybar",
+  "mako",
+  "wl-paste --watch cliphist store",
+  # lock after 5 min, switch screens... (needs swayidle + swaylock)
+  # "swayidle -w timeout 300 'swaylock -f -c 000000'",
+]
+
+[general]
+terminal = "foot"
+gap = 12
+border = 2
+modifier = "auto"   # super on a real session, alt when nested
+# scale = 1.0
+
+[input]
+# layout = "pl"     # keyboard layout: set this on a real TTY!
+tap_to_click = true
+natural_scroll = true
+
+[keybinds]
+# launchers
+"mod+d" = "spawn:fuzzel"
+"mod+shift+d" = "spawn:wofi --show drun"
+"mod+c" = "spawn:sh -c 'cliphist list | fuzzel --dmenu | cliphist decode | wl-copy'"
+# window management extras
+"mod+shift+q" = "close"
+# lock the screen
+"mod+shift+x" = "spawn:swaylock -f -c 000000"
+# screenshots (grim + slurp): region to clipboard, whole screen to ~/Pictures
+"mod+shift+s" = "spawn:sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
+"Print" = "spawn:sh -c 'mkdir -p ~/Pictures && grim ~/Pictures/$(date +%F_%H-%M-%S).png'"
+# audio (wireplumber), brightness, media
+"XF86AudioRaiseVolume" = "spawn:wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+"
+"XF86AudioLowerVolume" = "spawn:wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
+"XF86AudioMute" = "spawn:wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+"XF86MonBrightnessUp" = "spawn:brightnessctl set 10%+"
+"XF86MonBrightnessDown" = "spawn:brightnessctl set 10%-"
+"XF86AudioPlay" = "spawn:playerctl play-pause"
+"XF86AudioNext" = "spawn:playerctl next"
+"XF86AudioPrev" = "spawn:playerctl previous"
+# multi-monitor: send the focused window to the monitor on the left/right
+"mod+shift+comma" = "move-to-output-left"
+"mod+shift+period" = "move-to-output-right"
