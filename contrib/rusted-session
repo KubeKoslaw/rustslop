@@ -1,0 +1,31 @@
+#!/bin/sh
+# Session launcher for rusted-wm: sets up the environment, makes sure a D-Bus session bus
+# exists, logs to ~/.local/state/rusted-wm/session.log and runs the compositor on the real display.
+#
+# Used by the display manager entry (rusted.desktop) and runnable from a plain TTY:
+#   exec rusted-session            # e.g. at the end of ~/.bash_profile on tty1
+# Debugging knobs: RUSTED_ARGS="--winit" (nested window instead of a real display), RUSTED_WM=/path/to/rusted-wm
+
+# Make sure there is a session bus (Plasma-style sessions provide one; display managers often do not).
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -z "$RUSTED_IN_DBUS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    RUSTED_IN_DBUS=1 exec dbus-run-session -- "$0" "$@"
+fi
+
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=rusted
+export XDG_SESSION_DESKTOP=rusted
+export QT_QPA_PLATFORM="wayland;xcb"
+export MOZ_ENABLE_WAYLAND=1
+export ELECTRON_OZONE_PLATFORM_HINT=auto
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/rusted-wm"
+mkdir -p "$state_dir" 2>/dev/null
+if [ -d "$state_dir" ]; then
+    [ -f "$state_dir/session.log" ] && mv -f "$state_dir/session.log" "$state_dir/session.log.old"
+    exec >"$state_dir/session.log" 2>&1
+fi
+echo "rusted-session starting $(date) on $(tty 2>/dev/null) vt=${XDG_VTNR:-?} session=${XDG_SESSION_ID:-?}"
+
+# shellcheck disable=SC2086  # RUSTED_ARGS is intentionally word-split
+exec "${RUSTED_WM:-rusted-wm}" ${RUSTED_ARGS:---tty} "$@"

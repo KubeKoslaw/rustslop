@@ -1,6 +1,7 @@
 [Desktop Entry]
 Name=Rusted
 Comment=Rust Wayland compositor (tiling + floating)
-Exec=rusted-wm
+Exec=@PREFIX@/bin/rusted-session
+TryExec=@PREFIX@/bin/rusted-wm
 Type=Application
 DesktopNames=rusted
