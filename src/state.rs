@@ -4,7 +4,7 @@ use std::os::unix::io::OwnedFd;
 
 use smithay::{
     backend::{renderer::utils::on_commit_buffer_handler, session::libseat::LibSeatSession},
-    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_fractional_scale, delegate_data_device, delegate_layer_shell, delegate_output,
     delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
@@ -25,7 +25,7 @@ use smithay::{
     utils::Serial,
     wayland::{
         buffer::BufferHandler,
-        compositor::{get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState},
+        compositor::{get_parent, with_states, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
         selection::{
             data_device::{
@@ -49,6 +49,7 @@ use smithay::{
         viewporter::ViewporterState,
         xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
         cursor_shape::CursorShapeManagerState,
+        fractional_scale::{with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState},
     },
 };
 
@@ -71,6 +72,8 @@ pub struct State {
     pub viewporter_state: ViewporterState,
     #[allow(dead_code)] // keeps the cursor-shape global alive
     pub cursor_shape_state: CursorShapeManagerState,
+    #[allow(dead_code)] // keeps the fractional-scale global alive
+    pub fractional_scale_state: FractionalScaleManagerState,
     pub xdg_activation_state: XdgActivationState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
@@ -113,6 +116,22 @@ impl ClientData for ClientState {
 
 impl State {
     /// Find the window (on any workspace) whose root surface is `surface`.
+    /// Apply `general.scale` to the output and tell every toplevel/layer surface about it.
+    pub fn apply_scale(&mut self) {
+        let scale = self.config.general.scale;
+        self.output.change_current_state(None, None, Some(smithay::output::Scale::Fractional(scale)), None);
+        let mut surfaces: Vec<WlSurface> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| ws.entries.iter())
+            .filter_map(|e| e.window.toplevel().map(|t| t.wl_surface().clone()))
+            .collect();
+        surfaces.extend(layer_map_for_output(&self.output).layers().map(|l| l.wl_surface().clone()));
+        for s in surfaces {
+            with_states(&s, |states| with_fractional_scale(states, |fs| fs.set_preferred_scale(scale)));
+        }
+    }
+
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<Window> {
         self.workspaces
             .iter()
@@ -354,6 +373,18 @@ impl XdgActivationHandler for State {
 
 impl TabletSeatHandler for State {}
 
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // Walk up to the root so subsurfaces and popups get the same scale as their window.
+        let mut root = surface;
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let scale = self.config.general.scale;
+        with_states(&root, |states| with_fractional_scale(states, |fs| fs.set_preferred_scale(scale)));
+    }
+}
+
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -386,6 +417,7 @@ delegate_shm!(State);
 delegate_output!(State);
 delegate_viewporter!(State);
 delegate_cursor_shape!(State);
+delegate_fractional_scale!(State);
 delegate_xdg_activation!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);

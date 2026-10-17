@@ -273,6 +273,7 @@ fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
     }
     let borders = state.border_elements();
     let background = state.config.background;
+    let scale = state.config.general.scale;
     let pointer: Point<f64, Logical> = state.seat.get_pointer().unwrap().current_location();
 
     let mut elements: Vec<TtyElement> = Vec::new();
@@ -285,9 +286,9 @@ fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
                     .map(|d| d.lock().unwrap().hotspot)
                     .unwrap_or_default()
             });
-            let at: Point<i32, Physical> = (pointer - hotspot.to_f64()).to_physical_precise_round(1.0);
+            let at: Point<i32, Physical> = (pointer - hotspot.to_f64()).to_physical_precise_round(scale);
             elements.extend(
-                render_elements_from_surface_tree(&mut gpu.renderer, surface, at, 1.0, 1.0, Kind::Cursor)
+                render_elements_from_surface_tree(&mut gpu.renderer, surface, at, scale, 1.0, Kind::Cursor)
                     .into_iter()
                     .map(TtyElement::Surface),
             );
@@ -295,8 +296,8 @@ fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
         CursorImageStatus::Named(icon) => {
             let image = gpu.cursor.get(*icon);
             let at = Point::<f64, Physical>::from((
-                pointer.x - image.hotspot.x as f64,
-                pointer.y - image.hotspot.y as f64,
+                pointer.x * scale - image.hotspot.x as f64,
+                pointer.y * scale - image.hotspot.y as f64,
             ));
             match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, at, &image.buffer, None, None, None, Kind::Cursor) {
                 Ok(e) => elements.push(TtyElement::Memory(e)),

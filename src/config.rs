@@ -25,11 +25,13 @@ pub struct General {
     /// "alt", "super", or "auto" (default): Super on a real session, Alt when nested in another
     /// desktop (which usually keeps Super for itself).
     pub modifier: String,
+    /// Output scale, may be fractional (e.g. 1.5). Clamped to 0.5-4.
+    pub scale: f64,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into() }
+        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into(), scale: 1.0 }
     }
 }
 
@@ -230,6 +232,8 @@ impl Config {
             gap: raw.general.gap.max(0),
             border: raw.general.border.max(0),
             split_ratio: raw.general.split_ratio.clamp(crate::layout::MIN_RATIO, crate::layout::MAX_RATIO),
+            // The fractional-scale protocol speaks in 1/120ths.
+            scale: (raw.general.scale.clamp(0.5, 4.0) * 120.0).round() / 120.0,
             ..raw.general
         };
         (Self { general, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)

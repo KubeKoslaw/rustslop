@@ -4,7 +4,7 @@
 # Usage: tools/smoke.sh [outdir]     Exit code 0 = all checks passed. Screenshots land in outdir.
 set -u
 cd "$(dirname "$0")/.."
-OUT=${1:-${TMPDIR:-/tmp}/rusted-smoke}; mkdir -p "$OUT"
+OUT=${1:-${TMPDIR:-/tmp}/rusted-smoke}; mkdir -p "$OUT"; : > "$OUT/config.toml"
 CTL=tools/ctl.py
 pass=0; fail=0
 check() { # name, condition-exit-status
@@ -21,7 +21,7 @@ trap cleanup EXIT
 
 cargo build -q --all-targets 2>&1 | tail -3
 pkill -x rusted-wm 2>/dev/null; sleep 1
-RUSTED_CONFIG=/nonexistent RUST_LOG=info ./target/debug/rusted-wm >"$OUT/wm.log" 2>&1 &
+RUSTED_CONFIG="$OUT/config.toml" RUST_LOG=info ./target/debug/rusted-wm >"$OUT/wm.log" 2>&1 &
 sleep 3
 SOCK=$(ls "$XDG_RUNTIME_DIR" | grep -E '^rusted-[0-9]+$' | tail -1)
 n_windows() { $CTL info | grep -c "app_id="; }
@@ -72,6 +72,13 @@ check "bar reserves 40px" $($CTL info | grep -q "geo=12,52"; echo $?)
 $CTL shot "$OUT/bar.png" >/dev/null
 kill $LPID 2>/dev/null; sleep 1
 check "area restored after bar exits" $($CTL info | grep -q "geo=12,12"; echo $?)
+
+W0=$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')
+printf '[general]\nscale = 2.0\n' > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
+check "scale 2 halves the logical output width" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = $((W0 / 2)) ]; echo $?)
+$CTL shot "$OUT/scaled.png" >/dev/null
+: > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
+check "scale restored" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = "$W0" ]; echo $?)
 
 echo; echo "passed=$pass failed=$fail (outputs in $OUT)"
 [ "$fail" -eq 0 ]

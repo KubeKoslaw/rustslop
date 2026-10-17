@@ -28,6 +28,7 @@ use smithay::{
         },
         shm::ShmState,
         cursor_shape::CursorShapeManagerState,
+        fractional_scale::FractionalScaleManagerState,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
     },
@@ -82,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_manager_state: OutputManagerState::new_with_xdg_output::<State>(&dh),
         viewporter_state: ViewporterState::new::<State>(&dh),
         cursor_shape_state: CursorShapeManagerState::new::<State>(&dh),
+        fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
         xdg_activation_state: XdgActivationState::new::<State>(&dh),
         seat_state,
         data_device_state: DataDeviceState::new::<State>(&dh),
@@ -110,6 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     state.seat.add_keyboard(xkb, input.repeat_delay, input.repeat_rate)?;
     state.seat.add_pointer();
+    state.apply_scale();
 
     // Wayland clients: protocol requests and new connections.
     handle.insert_source(Generic::new(display, Interest::READ, Mode::Level), |_, display, state| {

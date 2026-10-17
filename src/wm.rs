@@ -8,7 +8,7 @@ use smithay::{
     desktop::{layer_map_for_output, space::RenderZindex, Window},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
-    utils::{Logical, Point, SERIAL_COUNTER},
+    utils::{Logical, Physical, Point, SERIAL_COUNTER},
 };
 
 use crate::{
@@ -378,6 +378,7 @@ impl State {
         if self.ws().entries.iter().any(|e| e.fullscreen) {
             return Vec::new();
         }
+        let scale = self.config.general.scale;
         let focused = self.focused_window();
         let mut out = Vec::new();
         let b = self.config.general.border;
@@ -399,7 +400,8 @@ impl State {
             let entry = &mut self.workspaces[self.current_ws].entries[i];
             for (buf, (x, y, w, h)) in entry.borders.iter_mut().zip(strips) {
                 buf.update((w, h), color);
-                out.push(SolidColorRenderElement::from_buffer(buf, (x, y), 1.0, 1.0, Kind::Unspecified));
+                let at: Point<i32, Physical> = Point::<f64, Physical>::from((x as f64 * scale, y as f64 * scale)).to_i32_round();
+                out.push(SolidColorRenderElement::from_buffer(buf, at, scale, 1.0, Kind::Unspecified));
             }
         }
         out
@@ -417,6 +419,7 @@ impl State {
         }
         self.split_ratio = config.general.split_ratio;
         self.config = config;
+        self.apply_scale();
         self.relayout();
         tracing::info!("config reloaded from {}", crate::config::Config::path().display());
         problems
