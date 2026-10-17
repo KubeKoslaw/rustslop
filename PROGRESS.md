@@ -8,16 +8,18 @@ Personal Wayland compositor in Rust on **Smithay 0.7.0**. Goal: Hyprland-style d
 Env: Linux (Gentoo), Wayland session, cargo 1.98.1, edition 2024. System libs present: wayland-server, xkbcommon.
 (Project folder was originally `~/Dokumenty/rusted`, now `~/Dokumenty/rustslop`.)
 
-## Current status: Phase 3 DONE (tiling + floating + workspaces + borders), verified via control socket + screenshots
-Phase 4 (popups, layer-shell, decorations, clipboard polish, config file) is next. Real-keyboard path (Alt keybinds through winit) has NOT been verified by the agent — see "Testing" below.
+## Current status: Phase 4 DONE (popups, layer-shell, decorations, clipboard, config) — branch `feat/phase-4-protocols-config`
+Phase 5 (real TTY/DRM session, libinput, multi-monitor, session entry, optional XWayland) is next. Real-keyboard (ydotool) path has still not been exercised by the agent.
 
 ## Layout
 - `Cargo.toml` — deps: `smithay` (features `backend_winit, renderer_glow, wayland_frontend, desktop`), `tracing`, `tracing-subscriber` (`env-filter`), `png`.
+- `src/config.rs` — TOML config (`$RUSTED_CONFIG` or `~/.config/rusted-wm/config.toml`; example in `config.example.toml`): gap, border, terminal, modifier (alt|super), colours, autostart, keybinds (merged over defaults, `"none"` removes). Parsed into `Binding`s. Invalid values are reported and fall back to defaults (never fatal). Unit tested.
+- `examples/layer_client.rs` — tiny layer-shell test bar (`WAYLAND_DISPLAY=rusted-1 ./target/debug/examples/layer_client top 40`).
 - `src/main.rs` — setup (Display, Output, State, sockets) + polling loop: winit events -> control socket commands -> render (`desktop::space::render_output`, borders as custom elements) -> frame callbacks -> clients -> submit -> offscreen screenshot if requested.
 - `src/state.rs` — `State` struct + Wayland handler impls (Compositor, Shm, Output, XdgShell, Seat, DataDevice). `window_for_surface` searches all workspaces.
 - `src/wm.rs` — window management: `Workspace`/`Entry` (window, floating flag, float rect, border buffers), `add_window`, `remove_window`, `relayout`, focus (`focus_window/focus_top/focus_next/focus_dir`), `toggle_floating`, `switch_workspace`, `move_to_workspace`, mouse drags (`begin_drag/update_drag`), `border_elements`. Only the current workspace's windows are mapped in the `Space`. Floating windows use z-index Shell+1 so they stay above tiled ones. `relayout` re-maps in existing z-order (Space::map_element raises).
 - `src/layout.rs` — PURE layout math (`dwindle`, `default_float_rect`) with unit tests (`cargo test`). Add new layouts here.
-- `src/input.rs` — `Action` enum, keybinds, pointer/click/axis handling. Modifier = **Alt** while nested (Super is taken by the host). Keys: `Alt+Enter` terminal (env `RUSTED_TERMINAL`, default konsole), `Alt+Q` close, `Alt+Tab` cycle focus, `Alt+h/j/k/l` focus direction, `Alt+F` toggle floating, `Alt+1..9` workspace, `Alt+Shift+1..9` move window to workspace, `Alt+Shift+E` quit. Mouse: `Alt+LeftDrag` move, `Alt+RightDrag` resize (tiled windows become floating); click focuses.
+- `src/input.rs` — `Action` enum, keybind matching against `config.bindings`, pointer/click/axis handling, popup dismissal, layer-aware `surface_under`. Default modifier = **Alt** while nested (Super is taken by the host; set `modifier = "super"` for a real session). Default keys: `mod+Enter` terminal, `mod+Q` close, `mod+Tab` cycle focus, `mod+h/j/k/l` focus direction, `mod+F` toggle floating, `mod+1..9` workspace, `mod+Shift+1..9` move window, `mod+Shift+R` reload config, `mod+Shift+E` quit. Mouse: `Alt+LeftDrag` move, `Alt+RightDrag` resize (tiled windows become floating); click focuses.
 - `src/control.rs` — debug control socket (see Testing). `tools/ctl.py` is the client.
 - Constants (gap 12, border 2, colours, 9 workspaces) are in `src/wm.rs`.
 
@@ -29,7 +31,7 @@ tools/ctl.py info                           # dump outputs/workspaces/windows (g
 tools/ctl.py spawn                          # open terminal (same as Alt+Enter)
 tools/ctl.py shot /tmp/x.png                # offscreen screenshot -> view the PNG
 ```
-Commands: `spawn`, `exec CMD ARGS`, `close`, `next`, `float`, `quit`, `focus h|j|k|l`, `ws N`, `mv N`, `motion X Y`, `click X Y [right]`, `drag move|resize X1 Y1 X2 Y2`, `shot PATH`, `info`.
+Commands: `reload` (re-read config), `spawn`, `exec CMD ARGS`, `close`, `next`, `float`, `quit`, `focus h|j|k|l`, `ws N`, `mv N`, `motion X Y`, `click X Y [right]`, `drag move|resize X1 Y1 X2 Y2`, `shot PATH`, `info`.
 Real keyboard test: `ydotool` is installed but needs `ydotoold` running and `/dev/uinput` access (root-only by default) and the nested window must have host focus.
 
 ## Log
@@ -55,12 +57,23 @@ Real keyboard test: `ydotool` is installed but needs `ydotoold` running and `/de
 - BUG FIXED: borrow error from `self.space.elements().next()` temporary — collect to a local first.
 - Verified through the control socket: 3-window dwindle tiling (screenshot checked), float toggle, focus direction, drag move/resize, move to workspace, workspace switch, close removes window.
 
+### Phase 4 — protocols, config (2026-10-17)
+- Popups: `PopupManager`; `new_popup` sets geometry from the positioner, `commit` forwards to `popups.commit` and sends the initial configure. Verified with a Konsole context menu. Simple popup grab replacement: a click outside every popup of the focused window dismisses them (`dismiss_popups_outside`). Real `xdg_popup.grab` is NOT implemented.
+- xdg-decoration: always ServerSide (= clients draw no title bars). Verified (Konsole lost its title bar).
+- wlr-layer-shell: `WlrLayerShellState` + `layer_map_for_output`. Tiling area = `non_exclusive_zone()` so bars reserve space; `relayout` after each layer commit/destroy. Exclusive-keyboard layers (launchers) get focus; clicking a layer that accepts keyboard focuses it. Layers receive frame callbacks. BUG FIXED: Smithay's `arrange()` never sends the initial configure, so clients never mapped — the commit handler now calls `layer_surface().send_pending_configure()`. Verified with `examples/layer_client.rs` (bar maps, windows shrink by its exclusive zone, area restores when it exits).
+- Selection: primary selection + wlr-data-control added; `SeatHandler::focus_changed` now calls `set_data_device_focus`/`set_primary_focus` (clipboard follows keyboard focus). Verified `wl-copy`/`wl-paste` round trip.
+- Also added: viewporter, config file + live reload (`reload` command/keybind), autostart, child processes are reaped by a waiter thread (fixes zombies).
+- Config test coverage: 4 unit tests (defaults, overrides/removal, bad input, colours). Live reload verified (gap 12->30->0, bad colour reported).
+- Pitfall for agents: never `pkill -f <pattern>` where the pattern appears in your own command line — it kills the shell. Use `pkill -x name`.
+
 ## Known limitations / TODO
 - Polling loop with sleep instead of calloop (planned to move to calloop in Phase 2).
 - Only the dwindle layout; no layout switching, no swap/move of tiled windows, no resize of tile ratios.
 - Borders are drawn above all windows (a floating window overlapping another window's border would be overdrawn by that border).
 - Output scale is assumed 1.0.
-- Child processes spawned by keybind are never `wait()`ed (zombies on exit) — fix with double-fork or a SIGCHLD handler.
+- No real popup grab (see Phase 4); Qt menus opened by an instantaneous synthetic click (press+release back to back) may close immediately.
+- Layer surfaces are always mapped on the single output; the requested output is ignored. Keyboard-interactive `OnDemand` layers only get focus on click.
+- No fractional scale / cursor-shape / xdg-activation / presentation-time yet.
 - No client cursor image support (host cursor is shown).
 - Popups, layer-shell, decorations not implemented.
 

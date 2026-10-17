@@ -83,13 +83,17 @@ impl State {
         let ok = || Reply::Text("ok".into());
 
         match parts.first().copied() {
-            Some("spawn") => self.run_action(Action::Spawn),
-            Some("exec") if parts.len() > 1 => {
-                let _ = std::process::Command::new(parts[1])
-                    .args(&parts[2..])
-                    .env("QT_QPA_PLATFORM", "wayland")
-                    .spawn();
+            Some("spawn") => {
+                let term = self.config.general.terminal.clone();
+                self.run_action(Action::Exec(term))
             }
+            Some("reload") => {
+                let problems = self.reload_config();
+                if !problems.is_empty() {
+                    return Reply::Text(format!("reloaded with problems:\n{}", problems.join("\n")));
+                }
+            }
+            Some("exec") if parts.len() > 1 => self.spawn(&parts[1..].join(" ")),
             Some("close") => self.run_action(Action::Close),
             Some("next") => self.run_action(Action::FocusNext),
             Some("float") => self.run_action(Action::ToggleFloating),
@@ -138,7 +142,7 @@ impl State {
             },
             Some("shot") if parts.len() == 2 => return Reply::Screenshot(PathBuf::from(parts[1])),
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., close, next, float, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH, info)"),
         }
         ok()
     }
