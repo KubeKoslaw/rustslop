@@ -11,6 +11,7 @@ gap = 12              # pixels between windows and screen edges
 border = 2            # focus border width (keep <= gap)
 terminal = "konsole"  # used by the plain `spawn` action
 split_ratio = 0.5     # share of each split taken by the first window (0.1-0.9)
+xwayland = true       # run Xwayland for X11 apps (needs the Xwayland binary)
 scale = 1.0           # output scale, fractional allowed (1.25, 1.5, ...)
 modifier = "auto"     # "auto" = super on a real session, alt when nested in another desktop; or "alt"/"super"
 

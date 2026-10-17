@@ -6,11 +6,13 @@ mod input;
 mod layout;
 mod state;
 mod wm;
+mod xwm;
 
-use std::{os::fd::{AsFd, BorrowedFd}, sync::Arc, time::Duration};
+use std::{os::fd::{AsFd, BorrowedFd}, process::Stdio, sync::Arc, time::Duration};
 
 use smithay::{
     desktop::{PopupManager, Space},
+    xwayland::{X11Wm, XWayland, XWaylandEvent},
     reexports::{
         calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
         wayland_server::{Display, ListeningSocket},
@@ -31,6 +33,7 @@ use smithay::{
         fractional_scale::FractionalScaleManagerState,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
+        xwayland_shell::XWaylandShellState,
     },
 };
 
@@ -88,6 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_shape_state: CursorShapeManagerState::new::<State>(&dh),
         fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
         xdg_activation_state: XdgActivationState::new::<State>(&dh),
+        xwayland_shell_state: XWaylandShellState::new::<State>(&dh),
+        xwm: None,
+        loop_handle: handle.clone(),
         seat_state,
         data_device_state: DataDeviceState::new::<State>(&dh),
         primary_selection_state,
@@ -138,6 +144,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     // Safety: still single-threaded (no other threads exist yet).
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &socket_name) };
+
+    // Xwayland for X11 apps. The X sockets exist as soon as it is spawned (it is started on
+    // demand), so DISPLAY can be exported right away; the window manager starts when it is ready.
+    if state.config.general.xwayland {
+        match XWayland::spawn(&dh, None, std::iter::empty::<(String, String)>(), true, Stdio::null(), Stdio::null(), |_| {}) {
+            Ok((xwayland, client)) => {
+                let display_number = xwayland.display_number();
+                // Safety: still single-threaded.
+                unsafe { std::env::set_var("DISPLAY", format!(":{display_number}")) };
+                tracing::info!("Xwayland on DISPLAY=:{display_number}");
+                let wm_handle = handle.clone();
+                handle.insert_source(xwayland, move |event, _, state| match event {
+                    XWaylandEvent::Ready { x11_socket, .. } => {
+                        match X11Wm::start_wm(wm_handle.clone(), x11_socket, client.clone()) {
+                            Ok(wm) => {
+                                state.xwm = Some(wm);
+                                tracing::info!("X11 window manager running");
+                            }
+                            Err(e) => tracing::warn!("failed to start the X11 window manager: {e}"),
+                        }
+                    }
+                    XWaylandEvent::Error => tracing::warn!("Xwayland failed to start"),
+                })?;
+            }
+            Err(e) => tracing::warn!("Xwayland unavailable: {e}"),
+        }
+    }
 
     // Debug/automation control socket.
     let control = Control::bind(&socket_name)?;

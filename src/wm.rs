@@ -1,5 +1,6 @@
 //! Window management: workspaces, tiling/floating, focus, borders, mouse drags.
 
+use smithay::wayland::seat::WaylandFocus as _;
 use smithay::{
     backend::renderer::element::{
         solid::{SolidColorBuffer, SolidColorRenderElement},
@@ -9,7 +10,7 @@ use smithay::{
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
-    utils::{Logical, Physical, Point, Transform, SERIAL_COUNTER},
+    utils::{Logical, Physical, Point, Rectangle, Transform, SERIAL_COUNTER},
 };
 
 use crate::{
@@ -20,8 +21,8 @@ use crate::{
 pub const WORKSPACE_COUNT: usize = 9;
 const MIN_FLOAT_SIZE: (i32, i32) = (120, 80);
 
-const Z_TILED: u8 = RenderZindex::Shell as u8;
-const Z_FLOATING: u8 = RenderZindex::Shell as u8 + 1;
+pub(crate) const Z_TILED: u8 = RenderZindex::Shell as u8;
+pub(crate) const Z_FLOATING: u8 = RenderZindex::Shell as u8 + 1;
 /// Above the Top layer (bars) but below Overlay.
 const Z_FULLSCREEN: u8 = RenderZindex::Top as u8 + 10;
 
@@ -57,6 +58,27 @@ pub struct Drag {
     pub kind: DragKind,
     pub start_pointer: Point<f64, Logical>,
     pub start_rect: Rect,
+}
+
+/// Dialogs, splash screens etc. start floating.
+fn window_is_dialog(window: &Window) -> bool {
+    use smithay::xwayland::xwm::WmWindowType as T;
+    if let Some(t) = window.toplevel() {
+        return t.parent().is_some();
+    }
+    window.x11_surface().is_some_and(|x| {
+        x.is_transient_for().is_some()
+            || x.window_type().is_some_and(|t| matches!(t, T::Dialog | T::Splash | T::Utility | T::Toolbar))
+    })
+}
+
+/// Ask a window to close itself (Wayland `xdg_toplevel.close` / X11 `WM_DELETE_WINDOW`).
+pub fn close_window(window: &Window) {
+    if let Some(t) = window.toplevel() {
+        t.send_close();
+    } else if let Some(x) = window.x11_surface() {
+        let _ = x.close();
+    }
 }
 
 /// One monitor and the workspace it currently shows (workspaces 1-9 are global; each is visible
@@ -138,7 +160,7 @@ impl State {
 
     /// Add a freshly created toplevel to the focused monitor's workspace.
     pub fn add_window(&mut self, window: Window) {
-        let is_dialog = window.toplevel().is_some_and(|t| t.parent().is_some());
+        let is_dialog = window_is_dialog(&window);
         let area = self.area_of(self.focused);
         let default = layout::default_float_rect(area);
         let float_rect = Rect::new(default.loc - self.output_loc(self.focused), default.size);
@@ -211,6 +233,10 @@ impl State {
                 } else {
                     tiles.next().unwrap_or(area)
                 };
+                if let Some(x11) = entry.window.x11_surface() {
+                    let _ = x11.set_fullscreen(entry.fullscreen);
+                    let _ = x11.configure(Some(Rectangle::new(rect.loc, rect.size)));
+                }
                 if let Some(toplevel) = entry.window.toplevel() {
                     let tiled = !entry.floating && !entry.fullscreen;
                     let fullscreen = entry.fullscreen;
@@ -256,8 +282,12 @@ impl State {
         self.space.raise_element(window, true);
         if let Some(toplevel) = window.toplevel() {
             toplevel.send_pending_configure();
+        }
+        // X11 windows only have a wl_surface once Xwayland has associated one (see
+        // `surface_associated`, which focuses them then).
+        if let Some(surface) = window.wl_surface().map(|s| s.into_owned()) {
             let keyboard = self.seat.get_keyboard().unwrap();
-            keyboard.set_focus(self, Some(toplevel.wl_surface().clone()), SERIAL_COUNTER.next_serial());
+            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
         }
     }
 
@@ -276,6 +306,10 @@ impl State {
     fn focused_stack(&self) -> Vec<Window> {
         let ws = self.ws();
         self.space.elements().filter(|w| ws.entries.iter().any(|e| &e.window == *w)).cloned().collect()
+    }
+
+    pub fn focused_stack_top(&self) -> Option<Window> {
+        self.focused_stack().pop()
     }
 
     /// Focus the topmost window of the focused monitor, or clear focus if it is empty.

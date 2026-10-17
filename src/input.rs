@@ -100,8 +100,8 @@ impl State {
                 self.reload_config();
             }
             Action::Close => {
-                if let Some(toplevel) = self.focused_window().and_then(|w| w.toplevel().cloned()) {
-                    toplevel.send_close();
+                if let Some(window) = self.focused_window() {
+                    crate::wm::close_window(&window);
                 }
             }
             Action::FocusNext => self.focus_next(),

@@ -80,6 +80,14 @@ $CTL shot "$OUT/scaled.png" >/dev/null
 : > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
 check "scale restored" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = "$W0" ]; echo $?)
 
+# ---- Xwayland: a Qt app forced onto the X11 backend ----
+N0=$(n_windows)
+$CTL exec env QT_QPA_PLATFORM=xcb konsole >/dev/null; sleep 6
+check "X11 window is managed (Xwayland)" $([ "$(n_windows)" = $((N0 + 1)) ]; echo $?)
+check "X11 window is tiled and focused" $($CTL info | grep "focused=true" | grep -q "floating=false"; echo $?)
+$CTL close >/dev/null; sleep 3
+check "closing the X11 window removes it" $([ "$(n_windows)" = "$N0" ]; echo $?)
+
 # ---- multi-monitor (virtual second output, 800x600, placed to the right of the first) ----
 outputs_n() { $CTL info | grep -c '^output '; }
 $CTL output add 800 600 >/dev/null; sleep 1

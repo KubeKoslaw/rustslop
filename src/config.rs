@@ -27,11 +27,13 @@ pub struct General {
     pub modifier: String,
     /// Output scale, may be fractional (e.g. 1.5). Clamped to 0.5-4.
     pub scale: f64,
+    /// Start Xwayland (if installed) so X11 apps work.
+    pub xwayland: bool,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into(), scale: 1.0 }
+        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into(), scale: 1.0, xwayland: true }
     }
 }
 

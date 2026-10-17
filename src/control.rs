@@ -195,19 +195,25 @@ impl State {
             }
             out += &format!("ws {}{}: {} window(s)\n", i + 1, if visible { " (visible)" } else { "" }, ws.entries.len());
             for e in &ws.entries {
-                let (title, app_id) = e
-                    .window
-                    .toplevel()
-                    .map(|t| {
-                        with_states(t.wl_surface(), |s| {
-                            let d = s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap();
-                            (d.title.clone().unwrap_or_default(), d.app_id.clone().unwrap_or_default())
+                let (title, app_id) = if let Some(x) = e.window.x11_surface() {
+                    (x.title(), x.class())
+                } else {
+                    e.window
+                        .toplevel()
+                        .map(|t| {
+                            with_states(t.wl_surface(), |s| {
+                                let d = s.data_map.get::<XdgToplevelSurfaceData>().unwrap().lock().unwrap();
+                                (d.title.clone().unwrap_or_default(), d.app_id.clone().unwrap_or_default())
+                            })
                         })
-                    })
-                    .unwrap_or_default();
-                let activated = e.window.toplevel().is_some_and(|t| {
-                    t.current_state().states.contains(xdg_toplevel::State::Activated)
-                });
+                        .unwrap_or_default()
+                };
+                let activated = match e.window.x11_surface() {
+                    Some(x) => x.is_activated(),
+                    None => e.window.toplevel().is_some_and(|t| {
+                        t.current_state().states.contains(xdg_toplevel::State::Activated)
+                    }),
+                };
                 let geo = if visible { self.space.element_geometry(&e.window) } else { None };
                 out += &format!(
                     "  - app_id={app_id:?} title={title:?} floating={} fullscreen={} focused={} activated={} geo={}\n",

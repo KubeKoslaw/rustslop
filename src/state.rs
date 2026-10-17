@@ -2,10 +2,11 @@
 
 use std::os::unix::io::OwnedFd;
 
+use smithay::wayland::seat::WaylandFocus as _;
 use smithay::{
     backend::{renderer::utils::on_commit_buffer_handler, session::libseat::LibSeatSession},
     delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_fractional_scale, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xwayland_shell, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
@@ -16,6 +17,7 @@ use smithay::{
             decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
             shell::server::xdg_toplevel,
         },
+        calloop::LoopHandle,
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
@@ -23,6 +25,7 @@ use smithay::{
         },
     },
     utils::Serial,
+    xwayland::{xwm::XwmId, X11Surface, X11Wm, XWaylandClientData},
     wayland::{
         buffer::BufferHandler,
         compositor::{get_parent, with_states, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState},
@@ -32,6 +35,7 @@ use smithay::{
                 set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
                 ServerDndGrabHandler,
             },
+            SelectionSource, SelectionTarget,
             primary_selection::{set_primary_focus, PrimarySelectionHandler, PrimarySelectionState},
             wlr_data_control::{DataControlHandler, DataControlState},
             SelectionHandler,
@@ -47,6 +51,7 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         viewporter::ViewporterState,
+        xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
         xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
         cursor_shape::CursorShapeManagerState,
         fractional_scale::{with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState},
@@ -75,6 +80,10 @@ pub struct State {
     #[allow(dead_code)] // keeps the fractional-scale global alive
     pub fractional_scale_state: FractionalScaleManagerState,
     pub xdg_activation_state: XdgActivationState,
+    pub xwayland_shell_state: XWaylandShellState,
+    /// The X11 window manager, once Xwayland is up.
+    pub xwm: Option<X11Wm>,
+    pub loop_handle: LoopHandle<'static, State>,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
     pub primary_selection_state: PrimarySelectionState,
@@ -129,7 +138,7 @@ impl State {
             .workspaces
             .iter()
             .flat_map(|ws| ws.entries.iter())
-            .filter_map(|e| e.window.toplevel().map(|t| t.wl_surface().clone()))
+            .filter_map(|e| e.window.wl_surface().map(|s| s.into_owned()))
             .collect();
         for m in &self.outputs {
             surfaces.extend(layer_map_for_output(&m.output).layers().map(|l| l.wl_surface().clone()));
@@ -144,7 +153,16 @@ impl State {
             .iter()
             .flat_map(|ws| ws.entries.iter())
             .map(|e| &e.window)
-            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
+            .find(|w| w.wl_surface().is_some_and(|s| &*s == surface))
+            .cloned()
+    }
+
+    /// The window wrapping an X11 surface (managed or override-redirect).
+    pub fn window_for_x11(&self, surface: &X11Surface) -> Option<Window> {
+        self.space
+            .elements()
+            .chain(self.workspaces.iter().flat_map(|ws| ws.entries.iter()).map(|e| &e.window))
+            .find(|w| w.x11_surface() == Some(surface))
             .cloned()
     }
 
@@ -168,6 +186,9 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        if let Some(data) = client.get_data::<XWaylandClientData>() {
+            return &data.compositor_state;
+        }
         &client.get_data::<ClientState>().unwrap().compositor_state
     }
 
@@ -404,6 +425,41 @@ impl FractionalScaleHandler for State {
 
 impl SelectionHandler for State {
     type SelectionUserData = ();
+
+    // Wayland client set a selection: offer it to X11 clients.
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
+                tracing::warn!("failed to forward {ty:?} selection to X11: {e:?}");
+            }
+        }
+    }
+
+    // An X11 client wants to read the Wayland selection.
+    fn send_selection(&mut self, ty: SelectionTarget, mime_type: String, fd: OwnedFd, _seat: Seat<Self>, _data: &()) {
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(e) = xwm.send_selection(ty, mime_type, fd, self.loop_handle.clone()) {
+                tracing::warn!("failed to send {ty:?} selection to X11: {e:?}");
+            }
+        }
+    }
+}
+
+impl XWaylandShellHandler for State {
+    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+        &mut self.xwayland_shell_state
+    }
+
+    // The window now has a wl_surface: if it is the one that should have focus, focus it.
+    fn surface_associated(&mut self, _xwm: XwmId, _wl_surface: WlSurface, surface: X11Surface) {
+        if let Some(window) = self.window_for_x11(&surface) {
+            if self.mon_of_window(&window) == Some(self.focused)
+                && self.focused_stack_top().as_ref() == Some(&window)
+            {
+                self.focus_window(&window);
+            }
+        }
+    }
 }
 
 impl DataDeviceHandler for State {
@@ -436,6 +492,7 @@ delegate_viewporter!(State);
 delegate_cursor_shape!(State);
 delegate_fractional_scale!(State);
 delegate_xdg_activation!(State);
+delegate_xwayland_shell!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);
 delegate_layer_shell!(State);
