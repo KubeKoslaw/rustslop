@@ -131,7 +131,7 @@ impl State {
             },
             Some("ws") if matches!(parts.get(1).copied(), Some("next" | "prev")) => {
                 let n = crate::wm::WORKSPACE_COUNT;
-                let cur = self.current_ws();
+                let cur = State::ws_number(self.current_ws());
                 let target = if parts[1] == "next" { (cur + 1) % n } else { (cur + n - 1) % n };
                 self.run_action(Action::Workspace(target));
             }
@@ -202,14 +202,14 @@ impl State {
             .unwrap_or(self.focused);
         let shown = self.outputs[mon].ws;
         let mut text = Vec::new();
-        for (i, ws) in self.workspaces.iter().enumerate() {
-            let visible_elsewhere = self.outputs.iter().enumerate().any(|(m, o)| m != mon && o.ws == i);
+        // Only this monitor's own workspaces.
+        let first = self.outputs[mon].slot * crate::wm::WORKSPACE_COUNT;
+        for n in 0..crate::wm::WORKSPACE_COUNT {
+            let (i, ws) = (first + n, &self.workspaces[first + n]);
             let label = if i == shown {
-                format!("<span foreground='#8aadf4'><b> {} </b></span>", i + 1)
-            } else if visible_elsewhere {
-                format!("<u> {} </u>", i + 1)
+                format!("<span foreground='#8aadf4'><b> {} </b></span>", n + 1)
             } else if !ws.entries.is_empty() {
-                format!(" {} ", i + 1)
+                format!(" {} ", n + 1)
             } else {
                 continue;
             };
@@ -219,9 +219,9 @@ impl State {
         format!(
             "{{\"text\": \"{}\", \"tooltip\": \"workspace {} ({} window(s))\", \"class\": \"ws-{}\"}}",
             text.join("").replace('\'', "\\u0027"),
-            shown + 1,
+            State::ws_number(shown) + 1,
             windows,
-            shown + 1
+            State::ws_number(shown) + 1
         )
     }
 
@@ -234,7 +234,7 @@ impl State {
             let o = self.space.output_geometry(&m.output).unwrap_or_default();
             out += &format!(
                 "output {}x{} at {},{} name={} current_ws={} focused={}\n",
-                o.size.w, o.size.h, o.loc.x, o.loc.y, m.output.name(), m.ws + 1, n == self.focused
+                o.size.w, o.size.h, o.loc.x, o.loc.y, m.output.name(), State::ws_number(m.ws) + 1, n == self.focused
             );
         }
         for (i, ws) in self.workspaces.iter().enumerate() {
@@ -242,7 +242,14 @@ impl State {
             if ws.entries.is_empty() && !visible {
                 continue;
             }
-            out += &format!("ws {}{}: {} window(s)\n", i + 1, if visible { " (visible)" } else { "" }, ws.entries.len());
+            // "ws 3" with one monitor; "ws 3@DP-1" once there are several (each has its own 1-9).
+            let name = if self.slots.len() > 1 { format!("@{}", self.slots[i / crate::wm::WORKSPACE_COUNT]) } else { String::new() };
+            out += &format!(
+                "ws {}{name}{}: {} window(s)\n",
+                State::ws_number(i) + 1,
+                if visible { " (visible)" } else { "" },
+                ws.entries.len()
+            );
             for e in &ws.entries {
                 let (title, app_id) = if let Some(x) = e.window.x11_surface() {
                     (x.title(), x.class())

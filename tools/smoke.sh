@@ -174,14 +174,21 @@ check "closing the X11 window removes it" $([ "$(n_windows)" = "$N0" ]; echo $?)
 # ---- multi-monitor (virtual second output, 800x600, placed to the right of the first) ----
 outputs_n() { $CTL info | grep -c '^output '; }
 $CTL output add 800 600 >/dev/null; sleep 1
+# each monitor has its own workspaces 1-9: cycling one monitor never touches the other
+$CTL output focus 1 >/dev/null
+for n in 1 2 3 4 1 2 3 4; do $CTL ws $n >/dev/null; done
+sleep 1
+check "workspace cycling on monitor 1 ends on 4 there" $($CTL info | grep '^output ' | sed -n 1p | grep -q "current_ws=4"; echo $?)
+check "monitor 2 keeps its own workspace (no swapping)" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)
+$CTL ws 1 >/dev/null
 check "second output appears at x=$W0" $($CTL info | grep '^output ' | sed -n 2p | grep -q "800x600 at $W0,0"; echo $?)
-check "second output shows its own workspace" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=2"; echo $?)
+check "second output starts on its own workspace 1" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=1"; echo $?)
 $CTL output focus 2 >/dev/null; $CTL spawn >/dev/null; sleep 3
 check "new window tiles on the focused (second) output" $($CTL info | grep -q "geo=$((W0 + 12)),12 776x576"; echo $?)
 $CTL focus h >/dev/null
 check "focus left at the monitor edge goes to the first output" $($CTL info | grep '^output ' | sed -n 1p | grep -q "focused=true"; echo $?)
 $CTL mvout l >/dev/null; sleep 1
-check "mvout moves the focused window to the second output's workspace" $($CTL info | grep -q "^ws 2 (visible): 2 window(s)"; echo $?)
+check "mvout moves the focused window to the second output's workspace" $($CTL info | grep -q "^ws 1@virtual-2 (visible): 2 window(s)"; echo $?)
 $CTL shot "$OUT/output2.png" 2 >/dev/null
 check "screenshot of output 2" $([ -s "$OUT/output2.png" ]; echo $?)
 $CTL output rm >/dev/null; sleep 1

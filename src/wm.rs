@@ -81,16 +81,50 @@ pub fn close_window(window: &Window) {
     }
 }
 
-/// One monitor and the workspace it currently shows (workspaces 1-9 are global; each is visible
-/// on at most one monitor).
+/// One monitor and the workspace it currently shows. Every monitor has its OWN workspaces 1-9
+/// (`Mon::slot` picks its block of nine in `State::workspaces`), so `Super+3` always means "the
+/// third workspace of the monitor I am on" and never moves anything between monitors.
 pub struct Mon {
     pub output: Output,
+    /// Block of `WORKSPACE_COUNT` workspaces this monitor owns (stable per output name).
+    pub slot: usize,
+    /// Index into `State::workspaces` of the workspace shown now (`slot * 9 + number`).
     pub ws: usize,
 }
 
 impl State {
+    /// Index (into `workspaces`) of the workspace shown on the focused monitor.
     pub fn current_ws(&self) -> usize {
         self.outputs[self.focused].ws
+    }
+
+    /// 0-based workspace number (what the user sees as 1-9) of a workspace index.
+    pub fn ws_number(ws: usize) -> usize {
+        ws % WORKSPACE_COUNT
+    }
+
+    /// Block of workspaces for the output called `name`, created on first use. A monitor that
+    /// is unplugged and plugged in again gets its workspaces back.
+    pub fn slot_for(&mut self, name: &str) -> usize {
+        if let Some(i) = self.slots.iter().position(|s| s == name) {
+            return i;
+        }
+        self.slots.push(name.to_string());
+        self.workspaces.extend((0..WORKSPACE_COUNT).map(|_| Workspace::default()));
+        self.slots.len() - 1
+    }
+
+    /// Show workspace `ws` (any monitor's) and focus that monitor; false if its monitor is gone.
+    pub fn show_workspace(&mut self, ws: usize) -> bool {
+        let slot = ws / WORKSPACE_COUNT;
+        let Some(mon) = self.outputs.iter().position(|m| m.slot == slot) else { return false };
+        self.drag = None;
+        self.outputs[mon].ws = ws;
+        self.focused = mon;
+        self.sync_space();
+        self.relayout();
+        self.focus_top();
+        true
     }
 
     /// The output that has keyboard/"current" focus.
@@ -487,33 +521,42 @@ impl State {
         self.focus_window(&window);
     }
 
-    /// Show workspace `n` on the focused monitor; if another monitor already shows it, go there.
+    /// Show the focused monitor's workspace number `n` (0-based).
     pub fn switch_workspace(&mut self, n: usize) {
-        if n >= WORKSPACE_COUNT || n == self.current_ws() {
+        if n >= WORKSPACE_COUNT {
+            return;
+        }
+        let target = self.outputs[self.focused].slot * WORKSPACE_COUNT + n;
+        if target == self.current_ws() {
             return;
         }
         self.drag = None;
-        if let Some(mon) = self.mon_of_ws(n) {
-            self.focus_output(mon);
-            return;
-        }
         let focused = self.focused;
-        self.outputs[focused].ws = n;
+        self.outputs[focused].ws = target;
         self.sync_space();
         self.relayout();
         self.focus_top();
         tracing::info!(workspace = n + 1, "switched workspace");
     }
 
+    /// Send the focused window to the focused monitor's workspace number `n` (0-based).
     pub fn move_to_workspace(&mut self, n: usize) {
+        if n < WORKSPACE_COUNT {
+            let target = self.outputs[self.focused].slot * WORKSPACE_COUNT + n;
+            self.move_window_to_index(target);
+        }
+    }
+
+    /// Move the focused window to workspace index `target` (any monitor's).
+    fn move_window_to_index(&mut self, target: usize) {
         let cur = self.current_ws();
-        if n >= WORKSPACE_COUNT || n == cur {
+        if target == cur {
             return;
         }
         let Some(window) = self.focused_window() else { return };
         let Some(pos) = self.workspaces[cur].entries.iter().position(|e| e.window == window) else { return };
         let entry = self.workspaces[cur].entries.remove(pos);
-        self.workspaces[n].entries.push(entry);
+        self.workspaces[target].entries.push(entry);
         self.sync_space();
         self.relayout();
         self.focus_top();
@@ -524,7 +567,7 @@ impl State {
         let Some(mon) = self.output_in_dir(dx, dy) else { return };
         let Some(window) = self.focused_window() else { return };
         let ws = self.outputs[mon].ws;
-        self.move_to_workspace(ws);
+        self.move_window_to_index(ws);
         // Focus follows the window to its new monitor.
         self.focus_output(mon);
         self.focus_window(&window);
@@ -549,8 +592,9 @@ impl State {
 
     /// Start using a new output (a hotplugged monitor): it shows the first free workspace.
     pub fn add_output(&mut self, output: Output) {
-        let ws = (0..WORKSPACE_COUNT).find(|&i| self.mon_of_ws(i).is_none()).unwrap_or(0);
-        self.outputs.push(Mon { output, ws });
+        // A monitor shows its own first workspace (or, if it was here before, that block again).
+        let slot = self.slot_for(&output.name());
+        self.outputs.push(Mon { output, slot, ws: slot * WORKSPACE_COUNT });
         self.apply_scale();
         self.sync_space();
         self.relayout();
@@ -566,6 +610,13 @@ impl State {
         // Layer surfaces (bars) of a vanished monitor have nowhere to go.
         for layer in layer_map_for_output(output).layers() {
             layer.layer_surface().send_close();
+        }
+        // Its windows move to the same-numbered workspaces of the first remaining monitor.
+        let dest = (0..self.outputs.len()).find(|&i| i != idx).unwrap_or(0);
+        let (from_slot, to_slot) = (self.outputs[idx].slot, self.outputs[dest].slot);
+        for k in 0..WORKSPACE_COUNT {
+            let moved: Vec<Entry> = self.workspaces[from_slot * WORKSPACE_COUNT + k].entries.drain(..).collect();
+            self.workspaces[to_slot * WORKSPACE_COUNT + k].entries.extend(moved);
         }
         let mon = self.outputs.remove(idx);
         self.space.unmap_output(&mon.output);

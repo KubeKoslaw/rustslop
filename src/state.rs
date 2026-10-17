@@ -110,7 +110,10 @@ pub struct State {
     pub popups: PopupManager,
 
     pub space: Space<Window>,
+    /// `WORKSPACE_COUNT` workspaces per monitor slot (see `Mon::slot`).
     pub workspaces: Vec<Workspace>,
+    /// Output names, one per block of workspaces.
+    pub slots: Vec<String>,
     /// Monitors, each with the workspace it shows; `focused` indexes the current one.
     pub outputs: Vec<Mon>,
     pub focused: usize,
@@ -421,8 +424,9 @@ impl XdgActivationHandler for State {
         }
         let Some(window) = self.window_for_surface(&surface) else { return };
         if let Some(ws) = self.workspaces.iter().position(|ws| ws.entries.iter().any(|e| e.window == window)) {
-            self.switch_workspace(ws);
-            self.focus_window(&window);
+            if self.show_workspace(ws) {
+                self.focus_window(&window);
+            }
         }
     }
 }

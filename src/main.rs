@@ -104,9 +104,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (false, false) => (Some(Winit::new(&dh)?), None, None),
     };
     let outputs: Vec<Mon> = match (&winit, &tty, &headless) {
-        (Some(w), _, _) => vec![Mon { output: w.output.clone(), ws: 0 }],
-        (_, Some(t), _) => t.outputs().into_iter().enumerate().map(|(i, output)| Mon { output, ws: i }).collect(),
-        (_, _, Some(h)) => vec![Mon { output: h.output.clone(), ws: 0 }],
+        (Some(w), _, _) => vec![Mon { output: w.output.clone(), slot: 0, ws: 0 }],
+        (_, Some(t), _) => t
+            .outputs()
+            .into_iter()
+            .enumerate()
+            .map(|(i, output)| Mon { output, slot: i, ws: i * WORKSPACE_COUNT })
+            .collect(),
+        (_, _, Some(h)) => vec![Mon { output: h.output.clone(), slot: 0, ws: 0 }],
         _ => unreachable!(),
     };
     let session = tty.as_ref().map(|t| t.session.clone());
@@ -147,7 +152,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seat,
         popups: PopupManager::default(),
         space,
-        workspaces: (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect(),
+        workspaces: (0..WORKSPACE_COUNT * outputs.len()).map(|_| Workspace::default()).collect(),
+        slots: outputs.iter().map(|m| m.output.name()).collect(),
         outputs,
         focused: 0,
         drag: None,
