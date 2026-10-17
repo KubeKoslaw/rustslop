@@ -1,21 +1,21 @@
-// Rusted Soft Minimal fastfetch theme: graphite/lavender, compact, no OS-logo noise.
+// Rusted Soft Minimal fastfetch theme: braille emblem, graphite/lavender, compact modules.
 {
   "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/master/doc/json_schema.json",
   "logo": {
     "type": "file",
     "source": "~/.config/fastfetch/logo.txt",
-    "padding": { "top": 0, "left": 1, "right": 2 },
-    "color": { "1": "magenta", "2": "bright_black" },
+    "padding": { "top": 0, "left": 0, "right": 2 },
+    "color": { "1": "magenta", "2": "blue" },
     "position": "left"
   },
   "display": {
     "separator": "  ",
-    "color": { "keys": "magenta", "title": "bright_magenta", "output": "white", "separator": "bright_black" },
+    "color": { "keys": "magenta", "title": "magenta", "output": "white", "separator": "dim_magenta" },
     "key": { "width": 11 }
   },
   "modules": [
     "title",
-    "separator",
+    { "type": "separator", "string": "─", "outputColor": "blue" },
     "os",
     "kernel",
     "uptime",
@@ -23,10 +23,11 @@
     "shell",
     "wm",
     "terminal",
-    { "type": "cpu", "format": "{name}" },
-    { "type": "gpu", "format": "{name} [{type}]" },
+    { "type": "command", "key": "CPU",
+      "text": "lscpu | sed -n 's/^Model name:[[:space:]]*//p' | sed 's/(R)//g; s/(TM)//g; s/13th Gen //; s/ CPU @.*//'" },
+    { "type": "gpu", "format": "{name}" },
     "memory",
     { "type": "disk", "folders": "/" },
-    "colors"
+    { "type": "colors", "symbol": "circle" }
   ]
 }
