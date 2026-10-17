@@ -57,6 +57,7 @@ impl Winit {
                 WinitEvent::Resized { size, .. } => {
                     output.change_current_state(Some(Mode { size, refresh: 60_000 }), None, None, None);
                     layer_map_for_output(&output).arrange();
+                    state.layout_outputs();
                     state.relayout();
                 }
                 WinitEvent::Input(event) => state.handle_input(event),
@@ -85,7 +86,7 @@ fn frame(
     time: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let age = backend.buffer_age().unwrap_or(0);
-    let borders = state.border_elements();
+    let borders = state.border_elements(output);
     let background = state.config.background;
     let damage = {
         let (renderer, mut framebuffer) = backend.bind()?;
@@ -112,8 +113,10 @@ fn frame(
     }
 
     // Screenshots are rendered offscreen so the window's EGL surface is left alone.
-    if let Some((path, stream)) = state.pending_shot.take() {
-        let reply = match super::screenshot(backend.renderer(), output, &state.space, &borders, background, &path) {
+    if let Some((path, mon, stream)) = state.pending_shot.take() {
+        let target = state.outputs[mon].output.clone();
+        let shot_borders = state.border_elements(&target);
+        let reply = match super::screenshot(backend.renderer(), &target, &state.space, &shot_borders, background, &path) {
             Ok(()) => "ok".to_string(),
             Err(e) => format!("error: {e}"),
         };

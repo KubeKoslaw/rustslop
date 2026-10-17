@@ -28,8 +28,8 @@ pub struct Control {
 /// What the main loop must do after a command ran.
 pub enum Reply {
     Text(String),
-    /// Take a screenshot into this path, then answer "ok".
-    Screenshot(PathBuf),
+    /// Take a screenshot of output N into this path, then answer "ok".
+    Screenshot(PathBuf, usize),
 }
 
 impl Control {
@@ -154,9 +154,25 @@ impl State {
                 }
                 _ => return err("drag move|resize X1 Y1 X2 Y2"),
             },
-            Some("shot") if parts.len() == 2 => return Reply::Screenshot(PathBuf::from(parts[1])),
+            Some("shot") if parts.len() == 2 || parts.len() == 3 => {
+                let mon = parts.get(2).and_then(|n| n.parse::<usize>().ok()).unwrap_or(1).max(1) - 1;
+                return Reply::Screenshot(PathBuf::from(parts[1]), mon.min(self.outputs.len() - 1));
+            }
+            Some("output") => match (parts.get(1).copied(), num(2), num(3)) {
+                (Some("add"), Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => self.add_virtual_output(w as i32, h as i32),
+                (Some("rm"), _, _) => self.remove_last_output(),
+                (Some("focus"), Some(n), _) if n >= 1.0 => self.focus_output(n as usize - 1),
+                _ => return err("output add W H | output rm | output focus N"),
+            },
+            Some("mvout") => match parts.get(1).copied() {
+                Some("h") => self.run_action(Action::MoveToOutput(-1, 0)),
+                Some("l") => self.run_action(Action::MoveToOutput(1, 0)),
+                Some("k") => self.run_action(Action::MoveToOutput(0, -1)),
+                Some("j") => self.run_action(Action::MoveToOutput(0, 1)),
+                _ => return err("mvout h|j|k|l"),
+            },
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH [N], output add W H|rm|focus N, mvout h|j|k|l, info)"),
         }
         ok()
     }
@@ -165,13 +181,19 @@ impl State {
     fn describe(&self) -> String {
         let focused = self.focused_window();
         let mut out = String::new();
-        let o = self.space.output_geometry(&self.output).unwrap_or_default();
-        out += &format!("output {}x{} current_ws={}\n", o.size.w, o.size.h, self.current_ws + 1);
+        for (n, m) in self.outputs.iter().enumerate() {
+            let o = self.space.output_geometry(&m.output).unwrap_or_default();
+            out += &format!(
+                "output {}x{} at {},{} name={} current_ws={} focused={}\n",
+                o.size.w, o.size.h, o.loc.x, o.loc.y, m.output.name(), m.ws + 1, n == self.focused
+            );
+        }
         for (i, ws) in self.workspaces.iter().enumerate() {
-            if ws.entries.is_empty() && i != self.current_ws {
+            let visible = self.outputs.iter().any(|m| m.ws == i);
+            if ws.entries.is_empty() && !visible {
                 continue;
             }
-            out += &format!("ws {}{}: {} window(s)\n", i + 1, if i == self.current_ws { " (current)" } else { "" }, ws.entries.len());
+            out += &format!("ws {}{}: {} window(s)\n", i + 1, if visible { " (visible)" } else { "" }, ws.entries.len());
             for e in &ws.entries {
                 let (title, app_id) = e
                     .window
@@ -186,7 +208,7 @@ impl State {
                 let activated = e.window.toplevel().is_some_and(|t| {
                     t.current_state().states.contains(xdg_toplevel::State::Activated)
                 });
-                let geo = if i == self.current_ws { self.space.element_geometry(&e.window) } else { None };
+                let geo = if visible { self.space.element_geometry(&e.window) } else { None };
                 out += &format!(
                     "  - app_id={app_id:?} title={title:?} floating={} fullscreen={} focused={} activated={} geo={}\n",
                     e.floating,

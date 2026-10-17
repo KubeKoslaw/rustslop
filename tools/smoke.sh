@@ -80,5 +80,21 @@ $CTL shot "$OUT/scaled.png" >/dev/null
 : > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
 check "scale restored" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = "$W0" ]; echo $?)
 
+# ---- multi-monitor (virtual second output, 800x600, placed to the right of the first) ----
+outputs_n() { $CTL info | grep -c '^output '; }
+$CTL output add 800 600 >/dev/null; sleep 1
+check "second output appears at x=$W0" $($CTL info | grep '^output ' | sed -n 2p | grep -q "800x600 at $W0,0"; echo $?)
+check "second output shows its own workspace" $($CTL info | grep '^output ' | sed -n 2p | grep -q "current_ws=2"; echo $?)
+$CTL output focus 2 >/dev/null; $CTL spawn >/dev/null; sleep 3
+check "new window tiles on the focused (second) output" $($CTL info | grep -q "geo=$((W0 + 12)),12 776x576"; echo $?)
+$CTL focus h >/dev/null
+check "focus left at the monitor edge goes to the first output" $($CTL info | grep '^output ' | sed -n 1p | grep -q "focused=true"; echo $?)
+$CTL mvout l >/dev/null; sleep 1
+check "mvout moves the focused window to the second output's workspace" $($CTL info | grep -q "^ws 2 (visible): 2 window(s)"; echo $?)
+$CTL shot "$OUT/output2.png" 2 >/dev/null
+check "screenshot of output 2" $([ -s "$OUT/output2.png" ]; echo $?)
+$CTL output rm >/dev/null; sleep 1
+check "output removed" $([ "$(outputs_n)" = 1 ]; echo $?)
+
 echo; echo "passed=$pass failed=$fail (outputs in $OUT)"
 [ "$fail" -eq 0 ]

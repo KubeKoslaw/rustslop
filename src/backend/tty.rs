@@ -1,7 +1,7 @@
 //! Real-session backend: DRM/KMS output, libinput input, libseat session (VT switching).
 //!
-//! Scope for now: the first connected connector on the primary GPU, one output, software cursor.
-//! Multi-monitor and hotplug come later. Start with `rusted-wm --tty` on a free VT (Ctrl+Alt+F3),
+//! Scope for now: every connected connector on the primary GPU (placed left to right), software
+//! cursor. Hotplug and multi-GPU come later. Start with `rusted-wm --tty` on a free VT (Ctrl+Alt+F3),
 //! or just run it with no `$WAYLAND_DISPLAY`/`$DISPLAY` set.
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -71,12 +71,19 @@ smithay::backend::renderer::element::render_elements! {
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
 }
 
+/// One connected display: its output, CRTC and scan-out queue.
+struct Head {
+    output: Output,
+    crtc: crtc::Handle,
+    compositor: Compositor,
+    frame_pending: bool,
+}
+
 struct Gpu {
     drm: DrmDevice,
-    compositor: Compositor,
     renderer: GlesRenderer,
     cursor: CursorTheme,
-    frame_pending: bool,
+    heads: Vec<Head>,
     active: bool,
 }
 
@@ -86,7 +93,6 @@ pub struct Tty {
     seat_name: String,
     drm_notifier: DrmDeviceNotifier,
     gpu: Gpu,
-    pub output: Output,
 }
 
 type BoxError = Box<dyn std::error::Error>;
@@ -109,84 +115,99 @@ impl Tty {
 
         let (mut drm, drm_notifier) = DrmDevice::new(fd.clone(), true)?;
         let gbm = GbmDevice::new(fd.clone())?;
-        // Safety: the gbm device outlives the EGL display (both are owned by `Gpu`/the compositor).
+        // Safety: the gbm device outlives the EGL display (both are owned by `Gpu`/the compositors).
         let egl = unsafe { EGLDisplay::new(gbm.clone())? };
         let context = EGLContext::new(&egl)?;
         let renderer = unsafe { GlesRenderer::new(context)? };
 
-        // First connected connector with a mode.
+        // Every connected connector with a mode, each on its own CRTC.
         let resources = drm.resource_handles()?;
-        let (conn, mode) = resources
+        let mut used: Vec<crtc::Handle> = Vec::new();
+        let mut heads: Vec<Head> = Vec::new();
+        let connectors: Vec<connector::Info> = resources
             .connectors()
             .iter()
             .filter_map(|&h| drm.get_connector(h, true).ok())
             .filter(|c| c.state() == connector::State::Connected)
-            .find_map(|c| {
-                let mode = c
-                    .modes()
-                    .iter()
-                    .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-                    .or(c.modes().first())
-                    .copied()?;
-                Some((c, mode))
-            })
-            .ok_or("no connected display found")?;
-        let crtc: crtc::Handle = conn
-            .current_encoder()
-            .and_then(|e| drm.get_encoder(e).ok())
-            .and_then(|e| e.crtc())
-            .or_else(|| {
+            .collect();
+        for conn in connectors {
+            let Some(mode) = conn
+                .modes()
+                .iter()
+                .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+                .or(conn.modes().first())
+                .copied()
+            else {
+                continue;
+            };
+            let current = conn.current_encoder().and_then(|e| drm.get_encoder(e).ok()).and_then(|e| e.crtc());
+            let crtc: Option<crtc::Handle> = current.filter(|c| !used.contains(c)).or_else(|| {
                 conn.encoders()
                     .iter()
                     .filter_map(|&e| drm.get_encoder(e).ok())
-                    .find_map(|e| resources.filter_crtcs(e.possible_crtcs()).first().copied())
-            })
-            .ok_or("no usable CRTC for the connector")?;
+                    .flat_map(|e| resources.filter_crtcs(e.possible_crtcs()))
+                    .find(|c| !used.contains(c))
+            });
+            let Some(crtc) = crtc else {
+                tracing::warn!(connector = ?conn.interface(), "no free CRTC, skipping");
+                continue;
+            };
+            used.push(crtc);
 
-        let name = format!("{}-{}", conn.interface().as_str(), conn.interface_id());
-        let (w_mm, h_mm) = conn.size().unwrap_or((0, 0));
-        let output = Output::new(
-            name.clone(),
-            PhysicalProperties {
-                size: (w_mm as i32, h_mm as i32).into(),
-                subpixel: Subpixel::Unknown,
-                make: "rusted".into(),
-                model: name.clone(),
-            },
-        );
-        let _global = output.create_global::<State>(dh);
-        let output_mode = OutputMode::from(mode);
-        output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
-        output.set_preferred(output_mode);
-        tracing::info!(%name, mode = ?output_mode, "output ready");
+            let name = format!("{}-{}", conn.interface().as_str(), conn.interface_id());
+            let (w_mm, h_mm) = conn.size().unwrap_or((0, 0));
+            let output = Output::new(
+                name.clone(),
+                PhysicalProperties {
+                    size: (w_mm as i32, h_mm as i32).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "rusted".into(),
+                    model: name.clone(),
+                },
+            );
+            let _global = output.create_global::<State>(dh);
+            let output_mode = OutputMode::from(mode);
+            // Positions are assigned by `State::layout_outputs` once the config (scale) is known.
+            output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
+            output.set_preferred(output_mode);
+            tracing::info!(%name, mode = ?output_mode, "output ready");
 
-        let surface = drm.create_surface(crtc, mode, &[conn.handle()])?;
-        let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
-        let exporter = GbmFramebufferExporter::new(gbm.clone(), None);
-        let compositor: Compositor = DrmCompositor::new(
-            &output,
-            surface,
-            None,
-            allocator,
-            exporter,
-            COLOR_FORMATS,
-            renderer.dmabuf_formats(),
-            drm.cursor_size(),
-            Some(gbm),
-        )?;
+            let surface = drm.create_surface(crtc, mode, &[conn.handle()])?;
+            let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+            let exporter = GbmFramebufferExporter::new(gbm.clone(), None);
+            let compositor: Compositor = DrmCompositor::new(
+                &output,
+                surface,
+                None,
+                allocator,
+                exporter,
+                COLOR_FORMATS,
+                renderer.dmabuf_formats(),
+                drm.cursor_size(),
+                Some(gbm.clone()),
+            )?;
+            heads.push(Head { output, crtc, compositor, frame_pending: false });
+        }
+        if heads.is_empty() {
+            return Err("no connected display found".into());
+        }
 
         Ok(Self {
             session,
             session_notifier,
             seat_name,
             drm_notifier,
-            gpu: Gpu { drm, compositor, renderer, cursor: CursorTheme::load(), frame_pending: false, active: true },
-            output,
+            gpu: Gpu { drm, renderer, cursor: CursorTheme::load(), heads, active: true },
         })
     }
 
+    /// The outputs, in the order they are laid out (left to right).
+    pub fn outputs(&self) -> Vec<Output> {
+        self.gpu.heads.iter().map(|h| h.output.clone()).collect()
+    }
+
     pub fn register(self, handle: &LoopHandle<'static, State>) -> Result<(), BoxError> {
-        let Tty { session, session_notifier, seat_name, drm_notifier, gpu, output } = self;
+        let Tty { session, session_notifier, seat_name, drm_notifier, gpu } = self;
         let gpu = Rc::new(RefCell::new(gpu));
 
         // Input devices.
@@ -217,26 +238,28 @@ impl Tty {
                         if let Err(e) = gpu.drm.activate(true) {
                             tracing::error!("failed to re-activate the DRM device: {e}");
                         }
-                        gpu.compositor.reset_buffers();
-                        gpu.frame_pending = false;
+                        for head in &mut gpu.heads {
+                            head.compositor.reset_buffers();
+                            head.frame_pending = false;
+                        }
                         gpu.active = true;
                     }
                 }
             }
         })?;
 
-        // Page flips completed.
+        // Page flips completed (one event per CRTC).
         handle.insert_source(drm_notifier, {
             let gpu = gpu.clone();
-            let output = output.clone();
             move |event, _, state| match event {
-                DrmEvent::VBlank(_) => {
+                DrmEvent::VBlank(crtc) => {
                     let mut gpu = gpu.borrow_mut();
-                    if let Err(e) = gpu.compositor.frame_submitted() {
+                    let Some(idx) = gpu.heads.iter().position(|h| h.crtc == crtc) else { return };
+                    if let Err(e) = gpu.heads[idx].compositor.frame_submitted() {
                         tracing::warn!("frame_submitted: {e}");
                     }
-                    gpu.frame_pending = false;
-                    render(&mut gpu, state, &output);
+                    gpu.heads[idx].frame_pending = false;
+                    render(&mut gpu, state, idx);
                 }
                 DrmEvent::Error(e) => tracing::error!("drm error: {e}"),
             }
@@ -245,11 +268,11 @@ impl Tty {
         // Fallback tick: starts the first frame and retries when nothing was queued.
         handle.insert_source(Timer::from_duration(FRAME_INTERVAL), {
             let gpu = gpu.clone();
-            let start = std::time::Instant::now();
             move |_, _, state| {
                 let mut gpu = gpu.borrow_mut();
-                render(&mut gpu, state, &output);
-                let _ = start;
+                for idx in 0..gpu.heads.len() {
+                    render(&mut gpu, state, idx);
+                }
                 TimeoutAction::ToDuration(FRAME_INTERVAL)
             }
         })?;
@@ -257,65 +280,74 @@ impl Tty {
     }
 }
 
-/// Draw and queue one frame if the GPU is ours and idle.
-fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
+/// Draw and queue one frame on head `idx` if the GPU is ours and the head is idle.
+fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
     // Screenshots are rendered offscreen, so they work even while another VT is in front.
-    if let Some((path, stream)) = state.pending_shot.take() {
-        let borders = state.border_elements();
-        let reply = match super::screenshot(&mut gpu.renderer, output, &state.space, &borders, state.config.background, &path) {
+    if let Some((path, mon, stream)) = state.pending_shot.take() {
+        let target = state.outputs[mon].output.clone();
+        let borders = state.border_elements(&target);
+        let reply = match super::screenshot(&mut gpu.renderer, &target, &state.space, &borders, state.config.background, &path) {
             Ok(()) => "ok".to_string(),
             Err(e) => format!("error: {e}"),
         };
         control::answer(stream, &reply);
     }
-    if !gpu.active || gpu.frame_pending {
+    if !gpu.active || gpu.heads[idx].frame_pending {
         return;
     }
-    let borders = state.border_elements();
+    let output = gpu.heads[idx].output.clone();
+    let geo = state.space.output_geometry(&output).unwrap_or_default();
+    let borders = state.border_elements(&output);
     let background = state.config.background;
     let scale = state.config.general.scale;
     let pointer: Point<f64, Logical> = state.seat.get_pointer().unwrap().current_location();
+    // Pointer relative to this output; the cursor is only drawn on the output it is on.
+    let local = pointer - geo.loc.to_f64();
+    let on_this_output = geo.to_f64().contains(pointer);
 
     let mut elements: Vec<TtyElement> = Vec::new();
-    match &state.cursor_status {
-        CursorImageStatus::Hidden => {}
-        CursorImageStatus::Surface(surface) => {
-            let hotspot = with_states(surface, |s| {
-                s.data_map
-                    .get::<CursorImageSurfaceData>()
-                    .map(|d| d.lock().unwrap().hotspot)
-                    .unwrap_or_default()
-            });
-            let at: Point<i32, Physical> = (pointer - hotspot.to_f64()).to_physical_precise_round(scale);
-            elements.extend(
-                render_elements_from_surface_tree(&mut gpu.renderer, surface, at, scale, 1.0, Kind::Cursor)
-                    .into_iter()
-                    .map(TtyElement::Surface),
-            );
-        }
-        CursorImageStatus::Named(icon) => {
-            let image = gpu.cursor.get(*icon);
-            let at = Point::<f64, Physical>::from((
-                pointer.x * scale - image.hotspot.x as f64,
-                pointer.y * scale - image.hotspot.y as f64,
-            ));
-            match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, at, &image.buffer, None, None, None, Kind::Cursor) {
-                Ok(e) => elements.push(TtyElement::Memory(e)),
-                Err(e) => tracing::warn!("cursor render: {e}"),
+    if on_this_output {
+        match &state.cursor_status {
+            CursorImageStatus::Hidden => {}
+            CursorImageStatus::Surface(surface) => {
+                let hotspot = with_states(surface, |s| {
+                    s.data_map
+                        .get::<CursorImageSurfaceData>()
+                        .map(|d| d.lock().unwrap().hotspot)
+                        .unwrap_or_default()
+                });
+                let at: Point<i32, Physical> = (local - hotspot.to_f64()).to_physical_precise_round(scale);
+                elements.extend(
+                    render_elements_from_surface_tree(&mut gpu.renderer, surface, at, scale, 1.0, Kind::Cursor)
+                        .into_iter()
+                        .map(TtyElement::Surface),
+                );
+            }
+            CursorImageStatus::Named(icon) => {
+                let image = gpu.cursor.get(*icon);
+                let at = Point::<f64, Physical>::from((
+                    local.x * scale - image.hotspot.x as f64,
+                    local.y * scale - image.hotspot.y as f64,
+                ));
+                match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, at, &image.buffer, None, None, None, Kind::Cursor) {
+                    Ok(e) => elements.push(TtyElement::Memory(e)),
+                    Err(e) => tracing::warn!("cursor render: {e}"),
+                }
             }
         }
     }
     elements.extend(borders.iter().cloned().map(TtyElement::Solid));
-    match space_render_elements(&mut gpu.renderer, [&state.space], output, 1.0) {
+    match space_render_elements(&mut gpu.renderer, [&state.space], &output, 1.0) {
         Ok(e) => elements.extend(e.into_iter().map(TtyElement::Space)),
         Err(e) => tracing::warn!("space render: {e}"),
     }
 
-    match gpu.compositor.render_frame(&mut gpu.renderer, &elements, background, FrameFlags::DEFAULT) {
+    let head = &mut gpu.heads[idx];
+    match head.compositor.render_frame(&mut gpu.renderer, &elements, background, FrameFlags::DEFAULT) {
         Ok(result) => {
             if !result.is_empty {
-                match gpu.compositor.queue_frame(()) {
-                    Ok(()) => gpu.frame_pending = true,
+                match head.compositor.queue_frame(()) {
+                    Ok(()) => head.frame_pending = true,
                     Err(e) => tracing::warn!("queue_frame: {e}"),
                 }
             }
@@ -323,6 +355,6 @@ fn render(gpu: &mut Gpu, state: &mut State, output: &Output) {
         Err(e) => tracing::warn!("render_frame: {e}"),
     }
 
-    state.send_frames(output, std::time::UNIX_EPOCH.elapsed().unwrap_or_default());
+    state.send_frames(&output, std::time::UNIX_EPOCH.elapsed().unwrap_or_default());
     let _ = state.display_handle.flush_clients();
 }

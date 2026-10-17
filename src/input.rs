@@ -28,6 +28,7 @@ pub enum Action {
     Close,
     FocusNext,
     FocusDir(i32, i32),
+    MoveToOutput(i32, i32),
     ToggleFloating,
     ToggleFullscreen,
     SwapDir(i32, i32),
@@ -49,7 +50,7 @@ impl State {
         match event {
             InputEvent::Keyboard { event } => self.on_keyboard(event.key_code(), event.state(), event.time_msec()),
             InputEvent::PointerMotionAbsolute { event } => {
-                let Some(geo) = self.space.output_geometry(&self.output) else { return };
+                let Some(geo) = self.space.output_geometry(&self.outputs[0].output) else { return };
                 let pos = Point::<f64, Logical>::from((
                     event.x_transformed(geo.size.w) + geo.loc.x as f64,
                     event.y_transformed(geo.size.h) + geo.loc.y as f64,
@@ -57,12 +58,8 @@ impl State {
                 self.move_pointer(pos, event.time_msec());
             }
             InputEvent::PointerMotion { event } => {
-                let Some(geo) = self.space.output_geometry(&self.output) else { return };
                 let cur = self.seat.get_pointer().unwrap().current_location();
-                let pos = Point::<f64, Logical>::from((
-                    (cur.x + event.delta_x()).clamp(geo.loc.x as f64, (geo.loc.x + geo.size.w - 1) as f64),
-                    (cur.y + event.delta_y()).clamp(geo.loc.y as f64, (geo.loc.y + geo.size.h - 1) as f64),
-                ));
+                let pos = self.clamp_to_outputs(Point::<f64, Logical>::from((cur.x + event.delta_x(), cur.y + event.delta_y())));
                 self.move_pointer(pos, event.time_msec());
             }
             InputEvent::PointerButton { event } => self.on_button(event.button_code(), event.state(), event.time_msec()),
@@ -109,6 +106,7 @@ impl State {
             }
             Action::FocusNext => self.focus_next(),
             Action::FocusDir(dx, dy) => self.focus_dir(dx, dy),
+            Action::MoveToOutput(dx, dy) => self.move_to_output(dx, dy),
             Action::ToggleFloating => self.toggle_floating(),
             Action::ToggleFullscreen => self.toggle_fullscreen(),
             Action::SwapDir(dx, dy) => self.swap_dir(dx, dy),
@@ -129,8 +127,10 @@ impl State {
     /// Surface under `pos` with its origin in global coordinates. Overlay/top layer surfaces
     /// (bars, launchers) are above windows, bottom/background ones below.
     fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let output_loc = self.space.output_geometry(&self.output)?.loc;
-        let map = layer_map_for_output(&self.output);
+        let mon = self.mon_at(pos)?;
+        let output = &self.outputs[mon].output;
+        let output_loc = self.space.output_geometry(output)?.loc;
+        let map = layer_map_for_output(output);
         let layer_hit = |layers: &[WlrLayer]| {
             layers.iter().find_map(|&l| {
                 let layer = map.layer_under(l, pos - output_loc.to_f64())?;
@@ -150,6 +150,23 @@ impl State {
         layer_hit(&[WlrLayer::Bottom, WlrLayer::Background])
     }
 
+    /// Keep `pos` inside the union of outputs (nearest point of the nearest output).
+    fn clamp_to_outputs(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        self.outputs
+            .iter()
+            .filter_map(|m| self.space.output_geometry(&m.output))
+            .map(|g| {
+                let c = Point::<f64, Logical>::from((
+                    pos.x.clamp(g.loc.x as f64, (g.loc.x + g.size.w - 1) as f64),
+                    pos.y.clamp(g.loc.y as f64, (g.loc.y + g.size.h - 1) as f64),
+                ));
+                ((c.x - pos.x).powi(2) + (c.y - pos.y).powi(2), c)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, c)| c)
+            .unwrap_or(pos)
+    }
+
     pub fn move_pointer(&mut self, pos: Point<f64, Logical>, time: u32) {
         let pointer = self.seat.get_pointer().unwrap();
         // While dragging a window the clients don't get pointer focus.
@@ -159,6 +176,13 @@ impl State {
         } else {
             self.surface_under(pos)
         };
+        // Crossing onto another monitor moves keyboard focus there too.
+        if self.drag.is_none() {
+            if let Some(mon) = self.mon_at(pos).filter(|&m| m != self.focused) {
+                self.focused = mon;
+                self.focus_top();
+            }
+        }
         pointer.motion(self, focus, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
         pointer.frame(self);
     }
@@ -197,10 +221,15 @@ impl State {
         if state == ButtonState::Pressed {
             self.dismiss_popups_outside(pos);
             let layer = {
-                let map = layer_map_for_output(&self.output);
-                let hit = [WlrLayer::Overlay, WlrLayer::Top, WlrLayer::Bottom, WlrLayer::Background]
-                    .iter()
-                    .find_map(|&l| map.layer_under(l, pos).cloned());
+                let mon = self.mon_at(pos);
+                let output = mon.map(|m| self.outputs[m].output.clone());
+                let hit = output.and_then(|o| {
+                    let local = pos - self.space.output_geometry(&o).unwrap_or_default().loc.to_f64();
+                    let map = layer_map_for_output(&o);
+                    [WlrLayer::Overlay, WlrLayer::Top, WlrLayer::Bottom, WlrLayer::Background]
+                        .iter()
+                        .find_map(|&l| map.layer_under(l, local).cloned())
+                });
                 hit.filter(|l| l.can_receive_keyboard_focus())
             };
             if let Some(layer) = layer {

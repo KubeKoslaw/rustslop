@@ -18,7 +18,7 @@ use smithay::{
     },
     desktop::{space::render_output, Space, Window},
     output::Output,
-    utils::Rectangle,
+    utils::{Rectangle, Transform},
 };
 
 /// Render the output into an offscreen texture, read it back and write a PNG.
@@ -44,9 +44,14 @@ pub fn screenshot(
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), w as u32, h as u32);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    // GL reads back bottom-up and the output is Flipped180: flip rows so the PNG is upright.
+    // The winit output is Flipped180 and its readback needs its rows flipped to come out upright;
+    // outputs with a Normal transform (TTY, virtual) are already upright.
     let stride = w as usize * 4;
-    let upright: Vec<u8> = bytes.chunks_exact(stride).rev().flatten().copied().collect();
+    let upright: Vec<u8> = if output.current_transform() == Transform::Flipped180 {
+        bytes.chunks_exact(stride).rev().flatten().copied().collect()
+    } else {
+        bytes.to_vec()
+    };
     encoder.write_header()?.write_image_data(&upright)?;
     Ok(())
 }

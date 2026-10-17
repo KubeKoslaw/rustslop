@@ -55,7 +55,7 @@ use smithay::{
 
 use crate::{
     config::Config,
-    wm::{Drag, Workspace},
+    wm::{Drag, Mon, Workspace},
 };
 
 pub struct State {
@@ -84,18 +84,19 @@ pub struct State {
 
     pub space: Space<Window>,
     pub workspaces: Vec<Workspace>,
-    pub current_ws: usize,
+    /// Monitors, each with the workspace it shows; `focused` indexes the current one.
+    pub outputs: Vec<Mon>,
+    pub focused: usize,
     pub drag: Option<Drag>,
     /// Share of each dwindle split taken by the first window.
     pub split_ratio: f32,
-    pub output: Output,
     pub config: Config,
     /// Present on a real (TTY) session: used for VT switching.
     pub session: Option<LibSeatSession>,
     /// Cursor requested by the focused client (drawn by the TTY backend).
     pub cursor_status: CursorImageStatus,
     /// Screenshot requested over the control socket; served by the backend after the next frame.
-    pub pending_shot: Option<(std::path::PathBuf, std::os::unix::net::UnixStream)>,
+    pub pending_shot: Option<(std::path::PathBuf, usize, std::os::unix::net::UnixStream)>,
     pub running: bool,
 }
 
@@ -116,17 +117,23 @@ impl ClientData for ClientState {
 
 impl State {
     /// Find the window (on any workspace) whose root surface is `surface`.
-    /// Apply `general.scale` to the output and tell every toplevel/layer surface about it.
+    /// Apply `general.scale` to every output, re-place the outputs and tell every toplevel/layer
+    /// surface about the scale.
     pub fn apply_scale(&mut self) {
         let scale = self.config.general.scale;
-        self.output.change_current_state(None, None, Some(smithay::output::Scale::Fractional(scale)), None);
+        for m in &self.outputs {
+            m.output.change_current_state(None, None, Some(smithay::output::Scale::Fractional(scale)), None);
+        }
+        self.layout_outputs();
         let mut surfaces: Vec<WlSurface> = self
             .workspaces
             .iter()
             .flat_map(|ws| ws.entries.iter())
             .filter_map(|e| e.window.toplevel().map(|t| t.wl_surface().clone()))
             .collect();
-        surfaces.extend(layer_map_for_output(&self.output).layers().map(|l| l.wl_surface().clone()));
+        for m in &self.outputs {
+            surfaces.extend(layer_map_for_output(&m.output).layers().map(|l| l.wl_surface().clone()));
+        }
         for s in surfaces {
             with_states(&s, |states| with_fractional_scale(states, |fs| fs.set_preferred_scale(scale)));
         }
@@ -141,9 +148,13 @@ impl State {
             .cloned()
     }
 
-    fn layer_for_surface(&self, surface: &WlSurface) -> Option<LayerSurface> {
-        let map = layer_map_for_output(&self.output);
-        map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL).cloned()
+    /// The layer surface owning `surface` and the output it lives on.
+    fn layer_for_surface(&self, surface: &WlSurface) -> Option<(LayerSurface, Output)> {
+        self.outputs.iter().find_map(|m| {
+            let map = layer_map_for_output(&m.output);
+            let layer = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL).cloned()?;
+            Some((layer, m.output.clone()))
+        })
     }
 }
 
@@ -173,9 +184,9 @@ impl CompositorHandler for State {
             if let Some(window) = self.window_for_surface(&root) {
                 window.on_commit();
             }
-            if let Some(layer) = self.layer_for_surface(&root) {
+            if let Some((layer, output)) = self.layer_for_surface(&root) {
                 // Bars may change the usable area, so re-arrange and re-tile.
-                layer_map_for_output(&self.output).arrange();
+                layer_map_for_output(&output).arrange();
                 // arrange() never sends the initial configure itself; this sends it (and any other
                 // pending change) so the client can map.
                 layer.layer_surface().send_pending_configure();
@@ -306,22 +317,28 @@ impl WlrLayerShellHandler for State {
         &mut self.layer_shell_state
     }
 
-    fn new_layer_surface(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface, _output: Option<WlOutput>, _layer: Layer, namespace: String) {
+    fn new_layer_surface(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface, wl_output: Option<WlOutput>, _layer: Layer, namespace: String) {
         tracing::info!(%namespace, "new layer surface");
+        // The requested output, or the focused one.
+        let output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .filter(|o| self.output_index(o).is_some())
+            .unwrap_or_else(|| self.focused_output().clone());
         let layer = LayerSurface::new(surface, namespace);
-        if let Err(e) = layer_map_for_output(&self.output).map_layer(&layer) {
+        if let Err(e) = layer_map_for_output(&output).map_layer(&layer) {
             tracing::warn!("failed to map layer surface: {e}");
         }
     }
 
     fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
-        let layer = layer_map_for_output(&self.output)
-            .layers()
-            .find(|l| l.layer_surface() == &surface)
-            .cloned();
-        if let Some(layer) = layer {
+        let found = self.outputs.iter().find_map(|m| {
+            let layer = layer_map_for_output(&m.output).layers().find(|l| l.layer_surface() == &surface).cloned()?;
+            Some((layer, m.output.clone()))
+        });
+        if let Some((layer, output)) = found {
             let had_focus = self.seat.get_keyboard().unwrap().current_focus().as_ref() == Some(layer.wl_surface());
-            layer_map_for_output(&self.output).unmap_layer(&layer);
+            layer_map_for_output(&output).unmap_layer(&layer);
             self.relayout();
             if had_focus {
                 self.focus_top();

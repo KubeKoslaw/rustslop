@@ -8,7 +8,8 @@ use smithay::{
     desktop::{layer_map_for_output, space::RenderZindex, Window},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
-    utils::{Logical, Physical, Point, SERIAL_COUNTER},
+    output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel},
+    utils::{Logical, Physical, Point, Transform, SERIAL_COUNTER},
 };
 
 use crate::{
@@ -58,29 +59,93 @@ pub struct Drag {
     pub start_rect: Rect,
 }
 
+/// One monitor and the workspace it currently shows (workspaces 1-9 are global; each is visible
+/// on at most one monitor).
+pub struct Mon {
+    pub output: Output,
+    pub ws: usize,
+}
+
 impl State {
-    /// Area available for windows: the output minus bars' exclusive zones (layer-shell).
-    fn area(&self) -> Rect {
-        let out = self.space.output_geometry(&self.output).unwrap_or_default();
-        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
+    pub fn current_ws(&self) -> usize {
+        self.outputs[self.focused].ws
+    }
+
+    /// The output that has keyboard/"current" focus.
+    pub fn focused_output(&self) -> &Output {
+        &self.outputs[self.focused].output
+    }
+
+    pub fn output_index(&self, output: &Output) -> Option<usize> {
+        self.outputs.iter().position(|m| &m.output == output)
+    }
+
+    pub fn output_loc(&self, mon: usize) -> Point<i32, Logical> {
+        self.space.output_geometry(&self.outputs[mon].output).unwrap_or_default().loc
+    }
+
+    /// Index of the monitor containing `pos`.
+    pub fn mon_at(&self, pos: Point<f64, Logical>) -> Option<usize> {
+        self.outputs.iter().position(|m| {
+            self.space.output_geometry(&m.output).is_some_and(|g| g.to_f64().contains(pos))
+        })
+    }
+
+    /// Place outputs left to right (logical widths) and map them into the space.
+    pub fn layout_outputs(&mut self) {
+        let mut x = 0;
+        for m in &self.outputs {
+            let size: smithay::utils::Size<i32, Logical> = m
+                .output
+                .current_mode()
+                .map(|mode| mode.size.to_f64().to_logical(m.output.current_scale().fractional_scale()).to_i32_round())
+                .unwrap_or_default();
+            m.output.change_current_state(None, None, None, Some((x, 0).into()));
+            self.space.map_output(&m.output, (x, 0));
+            x += size.w;
+        }
+    }
+
+    /// Area available for windows on monitor `mon`: the output minus bars' exclusive zones.
+    fn area_of(&self, mon: usize) -> Rect {
+        let output = &self.outputs[mon].output;
+        let out = self.space.output_geometry(output).unwrap_or_default();
+        let zone = layer_map_for_output(output).non_exclusive_zone();
         Rect::new(out.loc + zone.loc, zone.size)
     }
 
     pub fn ws(&self) -> &Workspace {
-        &self.workspaces[self.current_ws]
+        &self.workspaces[self.current_ws()]
+    }
+
+    /// Monitor showing workspace `ws`, if any.
+    fn mon_of_ws(&self, ws: usize) -> Option<usize> {
+        self.outputs.iter().position(|m| m.ws == ws)
+    }
+
+    fn ws_of_window(&self, window: &Window) -> Option<usize> {
+        self.workspaces.iter().position(|ws| ws.entries.iter().any(|e| &e.window == window))
+    }
+
+    /// Monitor on which `window` is currently shown.
+    pub fn mon_of_window(&self, window: &Window) -> Option<usize> {
+        self.mon_of_ws(self.ws_of_window(window)?)
     }
 
     fn entry_mut(&mut self, window: &Window) -> Option<&mut Entry> {
-        self.workspaces[self.current_ws].entries.iter_mut().find(|e| &e.window == window)
+        self.workspaces.iter_mut().flat_map(|ws| ws.entries.iter_mut()).find(|e| &e.window == window)
     }
 
-    /// Add a freshly created toplevel to the current workspace.
+    /// Add a freshly created toplevel to the focused monitor's workspace.
     pub fn add_window(&mut self, window: Window) {
         let is_dialog = window.toplevel().is_some_and(|t| t.parent().is_some());
-        let float_rect = layout::default_float_rect(self.area());
+        let area = self.area_of(self.focused);
+        let default = layout::default_float_rect(area);
+        let float_rect = Rect::new(default.loc - self.output_loc(self.focused), default.size);
         window.override_z_index(if is_dialog { Z_FLOATING } else { Z_TILED });
-        self.space.map_element(window.clone(), self.area().loc, true);
-        self.workspaces[self.current_ws].entries.push(Entry::new(window.clone(), is_dialog, float_rect));
+        self.space.map_element(window.clone(), area.loc, true);
+        let ws = self.current_ws();
+        self.workspaces[ws].entries.push(Entry::new(window.clone(), is_dialog, float_rect));
         self.relayout();
         self.focus_window(&window);
     }
@@ -98,49 +163,81 @@ impl State {
         self.focus_top();
     }
 
-    /// Apply the layout of the current workspace: tile, place floating windows, configure clients.
-    pub fn relayout(&mut self) {
-        let area = self.area();
-        let gap = self.config.general.gap;
-        let tiled_count = self.ws().entries.iter().filter(|e| !e.floating && !e.fullscreen).count();
-        let mut tiles = layout::dwindle(area, tiled_count, gap, self.split_ratio).into_iter();
-        let full = self.space.output_geometry(&self.output).unwrap_or_default();
-
-        let mut targets: Vec<(Window, Rect)> = Vec::new();
-        for entry in &self.workspaces[self.current_ws].entries {
-            let rect = if entry.fullscreen {
-                full
-            } else if entry.floating {
-                entry.float_rect
-            } else {
-                tiles.next().unwrap_or(area)
-            };
-            if let Some(toplevel) = entry.window.toplevel() {
-                let tiled = !entry.floating && !entry.fullscreen;
-                let fullscreen = entry.fullscreen;
-                toplevel.with_pending_state(|s| {
-                    s.size = Some(rect.size);
-                    if fullscreen {
-                        s.states.set(xdg_toplevel::State::Fullscreen);
-                    } else {
-                        s.states.unset(xdg_toplevel::State::Fullscreen);
-                    }
-                    for st in [
-                        xdg_toplevel::State::TiledLeft,
-                        xdg_toplevel::State::TiledRight,
-                        xdg_toplevel::State::TiledTop,
-                        xdg_toplevel::State::TiledBottom,
-                    ] {
-                        if tiled {
-                            s.states.set(st);
-                        } else {
-                            s.states.unset(st);
-                        }
-                    }
-                });
-                toplevel.send_pending_configure();
+    /// Make the space match what the monitors show: windows of visible workspaces are mapped,
+    /// all others unmapped and deactivated.
+    fn sync_space(&mut self) {
+        let mut mapped: Vec<(Window, Point<i32, Logical>)> = Vec::new();
+        for (i, m) in self.outputs.iter().enumerate() {
+            let loc = self.output_loc(i);
+            mapped.extend(self.workspaces[m.ws].entries.iter().map(|e| (e.window.clone(), loc)));
+        }
+        for (wi, ws) in self.workspaces.iter().enumerate() {
+            if self.outputs.iter().any(|m| m.ws == wi) {
+                continue;
             }
-            targets.push((entry.window.clone(), rect));
+            for e in &ws.entries {
+                if self.space.elements().any(|w| w == &e.window) {
+                    self.space.unmap_elem(&e.window);
+                    e.window.set_activated(false);
+                    if let Some(t) = e.window.toplevel() {
+                        t.send_pending_configure();
+                    }
+                }
+            }
+        }
+        for (w, loc) in mapped {
+            if !self.space.elements().any(|x| x == &w) {
+                self.space.map_element(w, loc, false);
+            }
+        }
+    }
+
+    /// Apply the layout of every monitor's workspace: tile, place floating windows, configure clients.
+    pub fn relayout(&mut self) {
+        let gap = self.config.general.gap;
+        let mut targets: Vec<(Window, Rect)> = Vec::new();
+        for mon in 0..self.outputs.len() {
+            let area = self.area_of(mon);
+            let loc = self.output_loc(mon);
+            let full = self.space.output_geometry(&self.outputs[mon].output).unwrap_or_default();
+            let ws = self.outputs[mon].ws;
+            let tiled_count = self.workspaces[ws].entries.iter().filter(|e| !e.floating && !e.fullscreen).count();
+            let mut tiles = layout::dwindle(area, tiled_count, gap, self.split_ratio).into_iter();
+            for entry in &self.workspaces[ws].entries {
+                let rect = if entry.fullscreen {
+                    full
+                } else if entry.floating {
+                    Rect::new(entry.float_rect.loc + loc, entry.float_rect.size)
+                } else {
+                    tiles.next().unwrap_or(area)
+                };
+                if let Some(toplevel) = entry.window.toplevel() {
+                    let tiled = !entry.floating && !entry.fullscreen;
+                    let fullscreen = entry.fullscreen;
+                    toplevel.with_pending_state(|s| {
+                        s.size = Some(rect.size);
+                        if fullscreen {
+                            s.states.set(xdg_toplevel::State::Fullscreen);
+                        } else {
+                            s.states.unset(xdg_toplevel::State::Fullscreen);
+                        }
+                        for st in [
+                            xdg_toplevel::State::TiledLeft,
+                            xdg_toplevel::State::TiledRight,
+                            xdg_toplevel::State::TiledTop,
+                            xdg_toplevel::State::TiledBottom,
+                        ] {
+                            if tiled {
+                                s.states.set(st);
+                            } else {
+                                s.states.unset(st);
+                            }
+                        }
+                    });
+                    toplevel.send_pending_configure();
+                }
+                targets.push((entry.window.clone(), rect));
+            }
         }
 
         // Re-map in current z-order: `map_element` raises, so walking back-to-front keeps the stack.
@@ -153,6 +250,9 @@ impl State {
     }
 
     pub fn focus_window(&mut self, window: &Window) {
+        if let Some(mon) = self.mon_of_window(window) {
+            self.focused = mon;
+        }
         self.space.raise_element(window, true);
         if let Some(toplevel) = window.toplevel() {
             toplevel.send_pending_configure();
@@ -172,9 +272,15 @@ impl State {
         self.window_for_surface(&surface)
     }
 
-    /// Focus the topmost window of the current workspace, or clear focus if it is empty.
+    /// Windows of the focused monitor's workspace, bottom to top.
+    fn focused_stack(&self) -> Vec<Window> {
+        let ws = self.ws();
+        self.space.elements().filter(|w| ws.entries.iter().any(|e| &e.window == *w)).cloned().collect()
+    }
+
+    /// Focus the topmost window of the focused monitor, or clear focus if it is empty.
     pub fn focus_top(&mut self) {
-        let top = self.space.elements().last().cloned();
+        let top = self.focused_stack().pop();
         if let Some(w) = top {
             self.focus_window(&w);
         } else {
@@ -185,19 +291,20 @@ impl State {
 
     /// Cycle focus: the bottom window of the stack comes to the front.
     pub fn focus_next(&mut self) {
-        let bottom = self.space.elements().next().cloned();
+        let bottom = self.focused_stack().into_iter().next();
         if let Some(w) = bottom {
             self.focus_window(&w);
         }
     }
 
-    /// Nearest window of the current workspace in direction (dx, dy), each in {-1, 0, 1}.
+    /// Nearest window of the same workspace in direction (dx, dy), each in {-1, 0, 1}.
     fn neighbor(&self, current: &Window, dx: i32, dy: i32) -> Option<Window> {
         let cur = self.space.element_geometry(current)?;
         let c = Point::<i32, Logical>::from((cur.loc.x + cur.size.w / 2, cur.loc.y + cur.size.h / 2));
+        let ws = &self.workspaces[self.ws_of_window(current)?];
         self.space
             .elements()
-            .filter(|w| *w != current)
+            .filter(|w| *w != current && ws.entries.iter().any(|e| &e.window == *w))
             .filter_map(|w| {
                 let g = self.space.element_geometry(w)?;
                 let p = Point::<i32, Logical>::from((g.loc.x + g.size.w / 2, g.loc.y + g.size.h / 2));
@@ -213,11 +320,51 @@ impl State {
             .map(|(_, w)| w)
     }
 
-    /// Focus the nearest window in direction (dx, dy).
+    /// Nearest monitor from the focused one in direction (dx, dy).
+    fn output_in_dir(&self, dx: i32, dy: i32) -> Option<usize> {
+        let center = |i: usize| {
+            let g = self.space.output_geometry(&self.outputs[i].output).unwrap_or_default();
+            (g.loc.x + g.size.w / 2, g.loc.y + g.size.h / 2)
+        };
+        let (cx, cy) = center(self.focused);
+        (0..self.outputs.len())
+            .filter(|&i| i != self.focused)
+            .filter_map(|i| {
+                let (x, y) = center(i);
+                let (vx, vy) = (x - cx, y - cy);
+                let along = vx * dx + vy * dy;
+                (along > 0).then(|| (along + 2 * ((vx * dy).abs() + (vy * dx).abs()), i))
+            })
+            .min_by_key(|(score, _)| *score)
+            .map(|(_, i)| i)
+    }
+
+    /// Make monitor `mon` the focused one: focus its top window and warp the pointer there.
+    pub fn focus_output(&mut self, mon: usize) {
+        if mon >= self.outputs.len() {
+            return;
+        }
+        self.focused = mon;
+        let geo = self.space.output_geometry(&self.outputs[mon].output).unwrap_or_default();
+        let center = Point::<f64, Logical>::from((
+            (geo.loc.x + geo.size.w / 2) as f64,
+            (geo.loc.y + geo.size.h / 2) as f64,
+        ));
+        self.focus_top();
+        self.move_pointer(center, 0);
+    }
+
+    /// Focus the nearest window in direction (dx, dy); at the edge of a monitor, go to the
+    /// neighbouring monitor in that direction.
     pub fn focus_dir(&mut self, dx: i32, dy: i32) {
-        let Some(current) = self.focused_window() else { return };
-        if let Some(w) = self.neighbor(&current, dx, dy) {
-            self.focus_window(&w);
+        if let Some(current) = self.focused_window() {
+            if let Some(w) = self.neighbor(&current, dx, dy) {
+                self.focus_window(&w);
+                return;
+            }
+        }
+        if let Some(mon) = self.output_in_dir(dx, dy) {
+            self.focus_output(mon);
         }
     }
 
@@ -225,7 +372,8 @@ impl State {
     pub fn swap_dir(&mut self, dx: i32, dy: i32) {
         let Some(current) = self.focused_window() else { return };
         let Some(other) = self.neighbor(&current, dx, dy) else { return };
-        let entries = &mut self.workspaces[self.current_ws].entries;
+        let ws = self.current_ws();
+        let entries = &mut self.workspaces[ws].entries;
         let (Some(a), Some(b)) = (
             entries.iter().position(|e| e.window == current),
             entries.iter().position(|e| e.window == other),
@@ -273,7 +421,9 @@ impl State {
 
     pub fn toggle_floating(&mut self) {
         let Some(window) = self.focused_window() else { return };
-        let area = self.area();
+        let Some(mon) = self.mon_of_window(&window) else { return };
+        let area = self.area_of(mon);
+        let loc = self.output_loc(mon);
         let geo = self.space.element_geometry(&window);
         let Some(entry) = self.entry_mut(&window) else { return };
         if entry.fullscreen {
@@ -282,55 +432,87 @@ impl State {
         entry.floating = !entry.floating;
         if entry.floating {
             // Keep the window where it is but shrink it a bit so the change is visible.
-            entry.float_rect = match geo {
+            let rect = match geo {
                 Some(g) if g.size.w < area.size.w * 8 / 10 => g,
                 _ => layout::default_float_rect(area),
             };
+            entry.float_rect = Rect::new(rect.loc - loc, rect.size);
         }
         window.override_z_index(if entry.floating { Z_FLOATING } else { Z_TILED });
         self.relayout();
         self.focus_window(&window);
     }
 
+    /// Show workspace `n` on the focused monitor; if another monitor already shows it, go there.
     pub fn switch_workspace(&mut self, n: usize) {
-        if n >= WORKSPACE_COUNT || n == self.current_ws {
+        if n >= WORKSPACE_COUNT || n == self.current_ws() {
             return;
         }
-        if self.drag.is_some() {
-            self.drag = None;
+        self.drag = None;
+        if let Some(mon) = self.mon_of_ws(n) {
+            self.focus_output(mon);
+            return;
         }
-        for e in &self.workspaces[self.current_ws].entries {
-            self.space.unmap_elem(&e.window);
-            e.window.set_activated(false);
-            if let Some(t) = e.window.toplevel() {
-                t.send_pending_configure();
-            }
-        }
-        self.current_ws = n;
-        let loc = self.area().loc;
-        let windows: Vec<Window> = self.ws().entries.iter().map(|e| e.window.clone()).collect();
-        for w in windows {
-            self.space.map_element(w, loc, false);
-        }
+        let focused = self.focused;
+        self.outputs[focused].ws = n;
+        self.sync_space();
         self.relayout();
         self.focus_top();
         tracing::info!(workspace = n + 1, "switched workspace");
     }
 
     pub fn move_to_workspace(&mut self, n: usize) {
-        if n >= WORKSPACE_COUNT || n == self.current_ws {
+        let cur = self.current_ws();
+        if n >= WORKSPACE_COUNT || n == cur {
             return;
         }
         let Some(window) = self.focused_window() else { return };
-        let cur = self.current_ws;
         let Some(pos) = self.workspaces[cur].entries.iter().position(|e| e.window == window) else { return };
         let entry = self.workspaces[cur].entries.remove(pos);
         self.workspaces[n].entries.push(entry);
-        self.space.unmap_elem(&window);
-        window.set_activated(false);
-        if let Some(t) = window.toplevel() {
-            t.send_pending_configure();
+        self.sync_space();
+        self.relayout();
+        self.focus_top();
+    }
+
+    /// Send the focused window to the workspace shown on the neighbouring monitor.
+    pub fn move_to_output(&mut self, dx: i32, dy: i32) {
+        let Some(mon) = self.output_in_dir(dx, dy) else { return };
+        let ws = self.outputs[mon].ws;
+        self.move_to_workspace(ws);
+    }
+
+    // ---- virtual outputs (control socket / tests) ----
+
+    /// Add an output without a backend (nothing is drawn on it, but it takes part in layout,
+    /// focus and screenshots). Used to exercise multi-monitor logic without hardware.
+    pub fn add_virtual_output(&mut self, w: i32, h: i32) {
+        let name = format!("virtual-{}", self.outputs.len() + 1);
+        let output = Output::new(
+            name.clone(),
+            PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "rusted".into(), model: name },
+        );
+        let _global = output.create_global::<State>(&self.display_handle);
+        let mode = OutputMode { size: (w, h).into(), refresh: 60_000 };
+        output.change_current_state(Some(mode), Some(Transform::Normal), None, None);
+        output.set_preferred(mode);
+        let ws = (0..WORKSPACE_COUNT).find(|&i| self.mon_of_ws(i).is_none()).unwrap_or(0);
+        self.outputs.push(Mon { output, ws });
+        self.apply_scale();
+        self.sync_space();
+        self.relayout();
+    }
+
+    pub fn remove_last_output(&mut self) {
+        if self.outputs.len() < 2 {
+            return;
         }
+        let mon = self.outputs.pop().unwrap();
+        self.space.unmap_output(&mon.output);
+        if self.focused >= self.outputs.len() {
+            self.focused = 0;
+        }
+        self.sync_space();
         self.relayout();
         self.focus_top();
     }
@@ -340,10 +522,11 @@ impl State {
     /// Start moving/resizing the window under the pointer. Tiled windows become floating first.
     pub fn begin_drag(&mut self, window: &Window, kind: DragKind, pointer: Point<f64, Logical>) {
         let Some(geo) = self.space.element_geometry(window) else { return };
+        let loc = self.mon_of_window(window).map(|m| self.output_loc(m)).unwrap_or_default();
         let Some(entry) = self.entry_mut(window) else { return };
         if !entry.floating {
             entry.floating = true;
-            entry.float_rect = geo;
+            entry.float_rect = Rect::new(geo.loc - loc, geo.size);
             window.override_z_index(Z_FLOATING);
         }
         let start_rect = entry.float_rect;
@@ -372,23 +555,25 @@ impl State {
 
     // ---- borders ----
 
-    /// Border strips drawn just outside every window of the current workspace.
-    pub fn border_elements(&mut self) -> Vec<SolidColorRenderElement> {
+    /// Border strips drawn just outside every window of `output`'s workspace, in output-local
+    /// physical coordinates.
+    pub fn border_elements(&mut self, output: &Output) -> Vec<SolidColorRenderElement> {
+        let Some(mon) = self.output_index(output) else { return Vec::new() };
+        let ws = self.outputs[mon].ws;
         // Borders are drawn above all windows, so hide them while something is fullscreen.
-        if self.ws().entries.iter().any(|e| e.fullscreen) {
+        if self.workspaces[ws].entries.iter().any(|e| e.fullscreen) {
             return Vec::new();
         }
+        let origin = self.output_loc(mon);
         let scale = self.config.general.scale;
         let focused = self.focused_window();
         let mut out = Vec::new();
         let b = self.config.general.border;
         let (focused_color, unfocused_color) = (self.config.focused, self.config.unfocused);
-        for i in 0..self.workspaces[self.current_ws].entries.len() {
-            if self.workspaces[self.current_ws].entries[i].fullscreen {
-                continue;
-            }
-            let window = self.workspaces[self.current_ws].entries[i].window.clone();
+        for i in 0..self.workspaces[ws].entries.len() {
+            let window = self.workspaces[ws].entries[i].window.clone();
             let Some(g) = self.space.element_geometry(&window) else { continue };
+            let g = Rect::new(g.loc - origin, g.size);
             let color = if focused.as_ref() == Some(&window) { focused_color } else { unfocused_color };
             // (x, y, w, h) of top, bottom, left, right
             let strips = [
@@ -397,7 +582,7 @@ impl State {
                 (g.loc.x - b, g.loc.y, b, g.size.h),
                 (g.loc.x + g.size.w, g.loc.y, b, g.size.h),
             ];
-            let entry = &mut self.workspaces[self.current_ws].entries[i];
+            let entry = &mut self.workspaces[ws].entries[i];
             for (buf, (x, y, w, h)) in entry.borders.iter_mut().zip(strips) {
                 buf.update((w, h), color);
                 let at: Point<i32, Physical> = Point::<f64, Physical>::from((x as f64 * scale, y as f64 * scale)).to_i32_round();
@@ -449,7 +634,9 @@ impl State {
     /// Tell clients a frame was presented (drives their next redraw).
     pub fn send_frames(&mut self, output: &smithay::output::Output, time: std::time::Duration) {
         for window in self.space.elements() {
-            window.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));
+            if self.space.outputs_for_element(window).contains(output) {
+                window.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));
+            }
         }
         for layer in layer_map_for_output(output).layers() {
             layer.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));

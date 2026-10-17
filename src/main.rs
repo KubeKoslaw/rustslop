@@ -38,7 +38,7 @@ use backend::{tty::Tty, winit::Winit};
 use config::Config;
 use control::{Control, Reply};
 use state::{ClientState, State};
-use wm::{Workspace, WORKSPACE_COUNT};
+use wm::{Mon, Workspace, WORKSPACE_COUNT};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -64,10 +64,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("config: {p}");
     }
     let (winit, tty) = if use_tty { (None, Some(Tty::new(&dh)?)) } else { (Some(Winit::new(&dh)?), None) };
-    let output = winit.as_ref().map(|w| w.output.clone()).or_else(|| tty.as_ref().map(|t| t.output.clone())).unwrap();
+    let outputs: Vec<Mon> = match (&winit, &tty) {
+        (Some(w), _) => vec![Mon { output: w.output.clone(), ws: 0 }],
+        (_, Some(t)) => t.outputs().into_iter().enumerate().map(|(i, output)| Mon { output, ws: i }).collect(),
+        _ => unreachable!(),
+    };
     let session = tty.as_ref().map(|t| t.session.clone());
-    let mut space = Space::default();
-    space.map_output(&output, (0, 0));
+    let space = Space::default();
 
     let mut seat_state = smithay::input::SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "seat0");
@@ -93,10 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         popups: PopupManager::default(),
         space,
         workspaces: (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect(),
-        current_ws: 0,
+        outputs,
+        focused: 0,
         drag: None,
         split_ratio: config.general.split_ratio,
-        output,
         config,
         session,
         cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
@@ -145,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some((line, stream)) = control.poll() {
             match state.run_command(&line) {
                 Reply::Text(t) => control::answer(stream, &t),
-                Reply::Screenshot(path) => state.pending_shot = Some((path, stream)),
+                Reply::Screenshot(path, mon) => state.pending_shot = Some((path, mon, stream)),
             }
         }
         let _ = state.display_handle.flush_clients();
