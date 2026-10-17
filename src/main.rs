@@ -47,11 +47,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display: Display<State> = Display::new()?;
     let dh = display.handle();
 
-    let (config, problems) = Config::load();
-    for p in &problems {
-        tracing::warn!("config: {p}");
-    }
-
     // Nested window when started inside another desktop, real display otherwise (override: --winit / --tty).
     let arg = std::env::args().nth(1);
     let use_tty = match arg.as_deref() {
@@ -61,6 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none(),
     };
     tracing::info!(backend = if use_tty { "tty" } else { "winit" }, "starting");
+    let (config, problems) = Config::load(use_tty);
+    for p in &problems {
+        tracing::warn!("config: {p}");
+    }
     let (winit, tty) = if use_tty { (None, Some(Tty::new(&dh)?)) } else { (Some(Winit::new(&dh)?), None) };
     let output = winit.as_ref().map(|w| w.output.clone()).or_else(|| tty.as_ref().map(|t| t.output.clone())).unwrap();
     let session = tty.as_ref().map(|t| t.session.clone());
@@ -157,6 +156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::env::set_var("XDG_SESSION_TYPE", "wayland");
             std::env::set_var("XDG_CURRENT_DESKTOP", "rusted");
         }
+        // Let D-Bus-activated programs (portals, notification daemons) find this compositor.
+        state.spawn("dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE 2>/dev/null");
     }
 
     for cmd in state.config.autostart.clone() {

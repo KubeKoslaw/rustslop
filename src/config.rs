@@ -22,13 +22,14 @@ pub struct General {
     pub terminal: String,
     /// Share of a split taken by the first window (0.1 - 0.9).
     pub split_ratio: f32,
-    /// "alt" (good for nested testing) or "super"
+    /// "alt", "super", or "auto" (default): Super on a real session, Alt when nested in another
+    /// desktop (which usually keeps Super for itself).
     pub modifier: String,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "alt".into() }
+        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "auto".into() }
     }
 }
 
@@ -115,7 +116,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self::from_raw(RawConfig::default()).0
+        Self::from_raw(RawConfig::default(), false).0
     }
 }
 
@@ -170,23 +171,23 @@ impl Config {
     }
 
     /// Load the config; returns it with a list of human-readable problems (empty if all fine).
-    pub fn load() -> (Self, Vec<String>) {
+    pub fn load(real_session: bool) -> (Self, Vec<String>) {
         let path = Self::path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text),
+            Ok(text) => Self::parse(&text, real_session),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), vec![]),
             Err(e) => (Self::default(), vec![format!("cannot read {}: {e}", path.display())]),
         }
     }
 
-    pub fn parse(text: &str) -> (Self, Vec<String>) {
+    pub fn parse(text: &str, real_session: bool) -> (Self, Vec<String>) {
         match toml::from_str::<RawConfig>(text) {
-            Ok(raw) => Self::from_raw(raw),
+            Ok(raw) => Self::from_raw(raw, real_session),
             Err(e) => (Self::default(), vec![format!("config parse error: {e}")]),
         }
     }
 
-    fn from_raw(raw: RawConfig) -> (Self, Vec<String>) {
+    fn from_raw(raw: RawConfig, real_session: bool) -> (Self, Vec<String>) {
         let mut problems = Vec::new();
         let mut color = |name: &str, s: &str, fallback: Color32F| {
             parse_color(s).unwrap_or_else(|| {
@@ -198,7 +199,15 @@ impl Config {
         let unfocused = color("colors.unfocused", &raw.colors.unfocused, Color32F::new(0.25, 0.27, 0.35, 1.0));
         let background = color("colors.background", &raw.colors.background, Color32F::new(0.08, 0.08, 0.12, 1.0));
 
-        let super_mod = raw.general.modifier.eq_ignore_ascii_case("super");
+        let super_mod = match raw.general.modifier.to_ascii_lowercase().as_str() {
+            "super" | "logo" | "win" => true,
+            "alt" => false,
+            "auto" => real_session,
+            other => {
+                problems.push(format!("invalid general.modifier {other:?} (use auto, alt or super)"));
+                real_session
+            }
+        };
         let mut keybinds: BTreeMap<String, String> =
             DEFAULT_KEYBINDS.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         keybinds.extend(raw.keybinds);
@@ -315,7 +324,7 @@ mod tests {
 
     #[test]
     fn defaults_have_all_bindings() {
-        let (c, problems) = Config::parse("");
+        let (c, problems) = Config::parse("", false);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(c.bindings.len(), DEFAULT_KEYBINDS.len());
         assert_eq!(c.general.gap, 12);
@@ -325,6 +334,7 @@ mod tests {
     fn overrides_and_removal() {
         let (c, p) = Config::parse(
             "[general]\ngap = 4\nmodifier = \"super\"\n[keybinds]\n\"mod+return\" = \"spawn:foot\"\n\"mod+q\" = \"none\"",
+            false,
         );
         assert!(p.is_empty(), "{p:?}");
         assert_eq!(c.general.gap, 4);
@@ -335,11 +345,24 @@ mod tests {
 
     #[test]
     fn bad_input_is_reported_not_fatal() {
-        let (c, p) = Config::parse("[colors]\nfocused = \"red\"\n[keybinds]\n\"mod+x\" = \"fly\"\n\"mod+nokey\" = \"close\"");
+        let (c, p) = Config::parse("[colors]\nfocused = \"red\"\n[keybinds]\n\"mod+x\" = \"fly\"\n\"mod+nokey\" = \"close\"", false);
         assert_eq!(p.len(), 3, "{p:?}");
         assert_eq!(c.general.border, 2);
-        let (_, p) = Config::parse("[general\n");
+        let (_, p) = Config::parse("[general\n", false);
         assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn modifier_auto_follows_session_kind() {
+        let ret = |real| {
+            let (c, _) = Config::parse("", real);
+            let b = c.bindings.iter().find(|b| matches!(&b.action, Action::Exec(_))).unwrap();
+            (b.logo, b.alt)
+        };
+        assert_eq!(ret(false), (false, true)); // nested: Alt
+        assert_eq!(ret(true), (true, false)); // real session: Super
+        let (c, _) = Config::parse("[general]\nmodifier = \"alt\"", true);
+        assert!(c.bindings.iter().all(|b| !b.logo));
     }
 
     #[test]

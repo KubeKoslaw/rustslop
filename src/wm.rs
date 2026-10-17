@@ -411,7 +411,7 @@ impl State {
 impl State {
     /// Re-read the config file and apply it to the running compositor.
     pub fn reload_config(&mut self) -> Vec<String> {
-        let (config, problems) = crate::config::Config::load();
+        let (config, problems) = crate::config::Config::load(self.session.is_some());
         for p in &problems {
             tracing::warn!("config: {p}");
         }
