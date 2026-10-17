@@ -85,6 +85,12 @@ check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)
 $CTL ws next >/dev/null; check "ws next goes to workspace 2" $($CTL info | grep -q "current_ws=2"; echo $?)
 $CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "current_ws=1"; echo $?)
 
+# ---- wlr-screencopy (stand-in for grim) ----
+WAYLAND_DISPLAY=$SOCK timeout 20 ./target/debug/examples/screencopy_client "$OUT/copy.png" >"$OUT/copy.log" 2>&1
+check "screencopy of the whole output" $(grep -q "ready" "$OUT/copy.log"; echo $?)
+WAYLAND_DISPLAY=$SOCK timeout 20 ./target/debug/examples/screencopy_client "$OUT/copy-region.png" 100,50,300,200 >"$OUT/copy2.log" 2>&1
+check "screencopy of a 300x200 region" $(grep -q "buffer 300x200" "$OUT/copy2.log" && grep -q ready "$OUT/copy2.log"; echo $?)
+
 # ---- session lock (ext-session-lock test client stands in for swaylock) ----
 WAYLAND_DISPLAY=$SOCK ./target/debug/examples/lock_client 6 >"$OUT/lock.log" 2>&1 &
 LOCKPID=$!; sleep 3

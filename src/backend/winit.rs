@@ -113,6 +113,10 @@ fn frame(
         );
     }
 
+    if state.has_pending_screencopy() {
+        state.serve_screencopy(|state, output| super::render_to_rgba(backend.renderer(), state, output));
+    }
+
     // Screenshots are rendered offscreen so the window's EGL surface is left alone.
     if let Some((path, mon, stream)) = state.pending_shot.take() {
         let target = state.outputs[mon].output.clone();

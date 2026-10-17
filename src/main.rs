@@ -4,6 +4,7 @@ mod control;
 mod cursor;
 mod input;
 mod layout;
+mod screencopy;
 mod state;
 mod wm;
 mod xwm;
@@ -105,6 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lock_surfaces: Vec::new(),
         presentation_state: PresentationState::new::<State>(&dh, <Monotonic as ClockSource>::ID as u32),
         clock: Clock::new(),
+        screencopy: screencopy::ScreencopyState::new(&dh),
         xwm: None,
         loop_handle: handle.clone(),
         seat_state,

@@ -86,6 +86,7 @@ pub struct State {
     pub fractional_scale_state: FractionalScaleManagerState,
     pub xdg_activation_state: XdgActivationState,
     pub xwayland_shell_state: XWaylandShellState,
+    pub screencopy: crate::screencopy::ScreencopyState,
     pub idle_notifier_state: IdleNotifierState<State>,
     #[allow(dead_code)] // keeps the idle-inhibit global alive
     pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,

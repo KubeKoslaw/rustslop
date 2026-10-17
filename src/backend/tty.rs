@@ -360,6 +360,9 @@ fn rescan(gpu: &mut Gpu, state: &mut State) {
 
 /// Draw and queue one frame on head `idx` if the GPU is ours and the head is idle.
 fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
+    if state.has_pending_screencopy() && gpu.active {
+        state.serve_screencopy(|state, output| super::render_to_rgba(&mut gpu.renderer, state, output));
+    }
     // Screenshots are rendered offscreen, so they work even while another VT is in front.
     if let Some((path, mon, stream)) = state.pending_shot.take() {
         let target = state.outputs[mon].output.clone();
