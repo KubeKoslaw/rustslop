@@ -20,13 +20,15 @@ pub struct General {
     pub gap: i32,
     pub border: i32,
     pub terminal: String,
+    /// Share of a split taken by the first window (0.1 - 0.9).
+    pub split_ratio: f32,
     /// "alt" (good for nested testing) or "super"
     pub modifier: String,
 }
 
 impl Default for General {
     fn default() -> Self {
-        Self { gap: 12, border: 2, terminal: "konsole".into(), modifier: "alt".into() }
+        Self { gap: 12, border: 2, terminal: "konsole".into(), split_ratio: 0.5, modifier: "alt".into() }
     }
 }
 
@@ -126,6 +128,13 @@ const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+l", "focus-right"),
     ("mod+k", "focus-up"),
     ("mod+j", "focus-down"),
+    ("mod+shift+h", "swap-left"),
+    ("mod+shift+l", "swap-right"),
+    ("mod+shift+k", "swap-up"),
+    ("mod+shift+j", "swap-down"),
+    ("mod+ctrl+h", "shrink"),
+    ("mod+ctrl+l", "grow"),
+    ("mod+shift+f", "toggle-fullscreen"),
     ("mod+shift+e", "quit"),
     ("mod+shift+r", "reload"),
     ("mod+1", "workspace:1"),
@@ -208,7 +217,12 @@ impl Config {
             }
         }
 
-        let general = General { gap: raw.general.gap.max(0), border: raw.general.border.max(0), ..raw.general };
+        let general = General {
+            gap: raw.general.gap.max(0),
+            border: raw.general.border.max(0),
+            split_ratio: raw.general.split_ratio.clamp(crate::layout::MIN_RATIO, crate::layout::MAX_RATIO),
+            ..raw.general
+        };
         (Self { general, input: raw.input, focused, unfocused, background, autostart: raw.autostart, bindings }, problems)
     }
 }
@@ -280,6 +294,13 @@ fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
         "focus-up" => Action::FocusDir(0, -1),
         "focus-down" => Action::FocusDir(0, 1),
         "toggle-floating" => Action::ToggleFloating,
+        "toggle-fullscreen" => Action::ToggleFullscreen,
+        "swap-left" => Action::SwapDir(-1, 0),
+        "swap-right" => Action::SwapDir(1, 0),
+        "swap-up" => Action::SwapDir(0, -1),
+        "swap-down" => Action::SwapDir(0, 1),
+        "grow" => Action::Resize(0.05),
+        "shrink" => Action::Resize(-0.05),
         "workspace" => Action::Workspace(ws(arg)?),
         "move-to-workspace" => Action::MoveToWorkspace(ws(arg)?),
         "reload" => Action::Reload,

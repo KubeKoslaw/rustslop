@@ -77,6 +77,8 @@ pub struct State {
     pub workspaces: Vec<Workspace>,
     pub current_ws: usize,
     pub drag: Option<Drag>,
+    /// Share of each dwindle split taken by the first window.
+    pub split_ratio: f32,
     pub output: Output,
     pub config: Config,
     /// Present on a real (TTY) session: used for VT switching.
@@ -218,6 +220,33 @@ impl XdgShellHandler for State {
             s.positioner = positioner;
         });
         surface.send_repositioned(token);
+    }
+
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        match self.window_for_surface(surface.wl_surface()) {
+            Some(window) => self.set_fullscreen(&window, true),
+            None => {
+                surface.send_configure();
+            }
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        match self.window_for_surface(surface.wl_surface()) {
+            Some(window) => self.set_fullscreen(&window, false),
+            None => {
+                surface.send_configure();
+            }
+        }
+    }
+
+    // Tiling decides the size; just answer the request so the client does not wait.
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        surface.send_pending_configure();
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        surface.send_pending_configure();
     }
 
     // Popup grabs (click outside dismisses a menu) are not implemented yet; menus still work and

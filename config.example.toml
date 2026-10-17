@@ -10,6 +10,7 @@ autostart = [
 gap = 12              # pixels between windows and screen edges
 border = 2            # focus border width (keep <= gap)
 terminal = "konsole"  # used by the plain `spawn` action
+split_ratio = 0.5     # share of each split taken by the first window (0.1-0.9)
 modifier = "alt"      # "alt" while testing nested, "super" on a real session
 
 [input]
@@ -28,6 +29,7 @@ background = "#14141f"
 
 # Merged over the defaults. "mod" is the modifier above. Use "none" to remove a default bind.
 # Actions: spawn, spawn:CMD ARGS, close, focus-next, focus-left/right/up/down, toggle-floating,
+#          swap-left/right/up/down, grow, shrink, toggle-fullscreen,
 #          workspace:N, move-to-workspace:N (N = 1-9), reload, quit
 [keybinds]
 # "mod+d" = "spawn:fuzzel"

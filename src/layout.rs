@@ -4,13 +4,17 @@ use smithay::utils::{Logical, Rectangle};
 
 pub type Rect = Rectangle<i32, Logical>;
 
+pub const MIN_RATIO: f32 = 0.1;
+pub const MAX_RATIO: f32 = 0.9;
+
 /// Hyprland-style "dwindle" layout.
 ///
-/// Window 0 gets half of `area`, window 1 half of what remains (split direction alternates
+/// Window 0 gets `ratio` (normally half) of `area`, window 1 half of what remains (split direction alternates
 /// with the shape of the remaining space), and so on; the last window takes the rest.
 /// `gap` is the space between windows and between windows and the screen edge.
 /// Returned rectangles are in the same order as the windows.
-pub fn dwindle(area: Rect, count: usize, gap: i32) -> Vec<Rect> {
+pub fn dwindle(area: Rect, count: usize, gap: i32, ratio: f32) -> Vec<Rect> {
+    let ratio = ratio.clamp(MIN_RATIO, MAX_RATIO);
     if count == 0 {
         return Vec::new();
     }
@@ -23,7 +27,7 @@ pub fn dwindle(area: Rect, count: usize, gap: i32) -> Vec<Rect> {
             break;
         }
         let (first, rest) = if remaining.size.w >= remaining.size.h {
-            let w = (remaining.size.w - gap) / 2;
+            let w = ((remaining.size.w - gap) as f32 * ratio) as i32;
             (
                 Rect::new(remaining.loc, (w, remaining.size.h).into()),
                 Rect::new(
@@ -32,7 +36,7 @@ pub fn dwindle(area: Rect, count: usize, gap: i32) -> Vec<Rect> {
                 ),
             )
         } else {
-            let h = (remaining.size.h - gap) / 2;
+            let h = ((remaining.size.h - gap) as f32 * ratio) as i32;
             (
                 Rect::new(remaining.loc, (remaining.size.w, h).into()),
                 Rect::new(
@@ -68,20 +72,20 @@ mod tests {
 
     #[test]
     fn empty_and_single() {
-        assert!(dwindle(area(), 0, 10).is_empty());
-        assert_eq!(dwindle(area(), 1, 10), vec![Rect::new((10, 10).into(), (980, 580).into())]);
+        assert!(dwindle(area(), 0, 10, 0.5).is_empty());
+        assert_eq!(dwindle(area(), 1, 10, 0.5), vec![Rect::new((10, 10).into(), (980, 580).into())]);
     }
 
     #[test]
     fn two_windows_split_side_by_side() {
-        let r = dwindle(area(), 2, 10);
+        let r = dwindle(area(), 2, 10, 0.5);
         assert_eq!(r[0], Rect::new((10, 10).into(), (485, 580).into()));
         assert_eq!(r[1], Rect::new((505, 10).into(), (485, 580).into()));
     }
 
     #[test]
     fn three_windows_alternate_direction() {
-        let r = dwindle(area(), 3, 10);
+        let r = dwindle(area(), 3, 10, 0.5);
         // right half (485x580) is taller than wide -> split top/bottom
         assert_eq!(r[1].loc.x, r[2].loc.x);
         assert!(r[2].loc.y > r[1].loc.y);
@@ -90,7 +94,7 @@ mod tests {
     #[test]
     fn no_overlap_and_inside_area() {
         for n in 1..12 {
-            let r = dwindle(area(), n, 8);
+            let r = dwindle(area(), n, 8, 0.5);
             assert_eq!(r.len(), n);
             for (i, a) in r.iter().enumerate() {
                 assert!(a.size.w > 0 && a.size.h > 0);
@@ -101,6 +105,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ratio_changes_first_window_share() {
+        let r = dwindle(area(), 2, 10, 0.7);
+        assert_eq!(r[0].size.w, 679); // (1000 - 2*10 - 10) * 0.7
+        assert_eq!(r[1].loc.x, r[0].loc.x + r[0].size.w + 10);
+        // out-of-range ratios are clamped instead of producing empty windows
+        let r = dwindle(area(), 2, 10, 5.0);
+        assert!(r[1].size.w > 0);
     }
 
     #[test]
