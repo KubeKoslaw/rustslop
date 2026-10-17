@@ -8,14 +8,20 @@ Personal Wayland compositor in Rust on **Smithay 0.7.0**. Goal: Hyprland-style d
 Env: Linux (Gentoo), Wayland session, cargo 1.98.1, edition 2024. System libs present: wayland-server, xkbcommon.
 (Project folder was originally `~/Dokumenty/rusted`, now `~/Dokumenty/rustslop`.)
 
-## Current status: Phase 5a DONE (calloop event loop) — branch `feat/phase-5a-calloop`
-Phase 5b (real TTY/DRM backend) is BLOCKED on a system package: `libseat` is not installed (`pkg-config libseat` fails; Smithay's `backend_session_libseat` needs it). User must run `sudo emerge sys-auth/seatd` (enable USE `elogind` since this machine runs elogind) — then add Smithay features `backend_drm, backend_gbm, backend_libinput, backend_session_libseat, backend_udev` and write `src/backend/tty.rs`. libinput, gbm, libdrm, udev, libdisplay-info are already present. 5b can only be fully tested on a spare TTY by the user (the agent cannot see a TTY); plan: compile-check + logs, user verifies.
+## Current status: Phase 5b WRITTEN, COMPILES, NOT YET RUN ON A REAL TTY — branch `feat/phase-5b-tty`
+libseat is now installed (0.9.3, has the elogind backend). Running `rusted-wm --tty` from inside the KDE session fails cleanly with "cannot open a libseat session" (expected: the graphical session already owns the seat). The real test must be done by the USER on a spare VT: Ctrl+Alt+F3, log in, `cd ~/Dokumenty/rustslop && ./target/debug/rusted-wm --tty 2>/tmp/rusted.log` (modifier is `alt` by default; Alt+Enter terminal, Alt+Shift+E quit, Ctrl+Alt+F2/F7 back to KDE). Then send the log. Expected first-run problems: modeset/atomic commit errors, wrong CRTC, no input (libinput seat), keyboard layout (set `[input] layout = "pl"` in config).
+
+Note: PLAN.md and PROGRESS.md are now in .gitignore and untracked (user wants them private); they only exist locally. They are still present in git history of PRs #1-#3 (commit 5d477a8) — history rewrite offered to the user.
 
 ## Layout
 - `Cargo.toml` — deps: `smithay` (features `backend_winit, renderer_glow, wayland_frontend, desktop`), `tracing`, `tracing-subscriber` (`env-filter`), `png`.
 - `src/config.rs` — TOML config (`$RUSTED_CONFIG` or `~/.config/rusted-wm/config.toml`; example in `config.example.toml`): gap, border, terminal, modifier (alt|super), colours, autostart, keybinds (merged over defaults, `"none"` removes). Parsed into `Binding`s. Invalid values are reported and fall back to defaults (never fatal). Unit tested.
 - `examples/layer_client.rs` — tiny layer-shell test bar (`WAYLAND_DISPLAY=rusted-1 ./target/debug/examples/layer_client top 40`).
 - `src/main.rs` — builds State and a **calloop** `EventLoop<State>` with sources: Wayland display (dispatch_clients), listening socket (`rusted-N`), control socket, and the backend. Exits when `state.running` is false.
+- `src/backend/tty.rs` — real session: LibSeatSession + udev primary GPU + `DrmDevice` + GBM/EGL `GlesRenderer` + `DrmCompositor` for the FIRST connected connector; libinput (`LibinputInputBackend`) as an input source; session pause/resume (VT switch) handling; VBlank-driven rendering with a 16 ms fallback timer; software cursor (`src/cursor.rs`: xcursor theme or built-in arrow; client cursor surfaces supported); same screenshot support (`backend::screenshot`). `TtyElement` is a `render_elements!` enum (concrete `<=GlesRenderer>` form — the generic form does not compile due to ImportMemWl/ImportDmaWl bounds).
+- `src/cursor.rs` — cursor image loading.
+- `contrib/rusted.desktop` — session file for display managers (copy to /usr/share/wayland-sessions/).
+- Backend choice: `--winit`, `--tty`, or automatic (tty if neither $WAYLAND_DISPLAY nor $DISPLAY is set).
 - `src/backend/winit.rs` — nested backend: `Winit::new` (window + Output), `Winit::register` (winit input/resize source + 16 ms frame timer that renders via `render_output`, sends frame callbacks, submits, and serves pending screenshots). A tty backend should live beside it as `backend/tty.rs`.
 - `src/state.rs` — `State` struct + Wayland handler impls (Compositor, Shm, Output, XdgShell, Seat, DataDevice). `window_for_surface` searches all workspaces.
 - `src/wm.rs` — window management: `Workspace`/`Entry` (window, floating flag, float rect, border buffers), `add_window`, `remove_window`, `relayout`, focus (`focus_window/focus_top/focus_next/focus_dir`), `toggle_floating`, `switch_workspace`, `move_to_workspace`, mouse drags (`begin_drag/update_drag`), `border_elements`. Only the current workspace's windows are mapped in the `Space`. Floating windows use z-index Shell+1 so they stay above tiled ones. `relayout` re-maps in existing z-order (Space::map_element raises).
@@ -75,12 +81,20 @@ Real keyboard test: `ydotool` is installed but needs `ydotoold` running and `/de
 - Gotchas: `Control` implements `AsFd` (via its listener) so it can be a `Generic` source; the display source flushes clients after each dispatch; a frame flushes clients before `submit` (swap may block).
 - Verified with the new `tools/smoke.sh`: 12/12 checks pass (same behaviour as before the refactor).
 
+### Phase 5b — TTY/DRM backend (2026-10-17)
+- Added `[input]` config (xkb layout/variant/options, repeat, tap-to-click, natural scroll) — needed on a TTY, where nothing tells us the keyboard layout. Touchpad settings applied on `DeviceAdded`.
+- Input handling is now generic over `InputBackend` (relative `PointerMotion` clamps to the output); Ctrl+Alt+F1..F12 -> `Action::SwitchVt` via `State.session`.
+- `State` gained `session` and `cursor_status` (set by `SeatHandler::cursor_image`).
+- Compile pitfalls hit: render_elements! generic form (see above); hotspot lives in `CursorImageSurfaceData` (= `Mutex<CursorImageAttributes>`); `Session` trait must be in scope for `change_vt`.
+- Verified: builds clean, nested smoke test still 12/12, `--tty` inside KDE errors cleanly. NOT verified: any real DRM output.
+
 ## Known limitations / TODO
 - Polling loop with sleep instead of calloop (planned to move to calloop in Phase 2).
 - Only the dwindle layout; no layout switching, no swap/move of tiled windows, no resize of tile ratios.
 - Borders are drawn above all windows (a floating window overlapping another window's border would be overdrawn by that border).
 - Output scale is assumed 1.0.
 - No real popup grab (see Phase 4); Qt menus opened by an instantaneous synthetic click (press+release back to back) may close immediately.
+- TTY: single output only (first connected connector), no hotplug, no multi-GPU, no XWayland, no DPMS/idle, cursor is always the default arrow (named cursors not mapped by shape).
 - Layer surfaces are always mapped on the single output; the requested output is ignored. Keyboard-interactive `OnDemand` layers only get focus on click.
 - No fractional scale / cursor-shape / xdg-activation / presentation-time yet.
 - No client cursor image support (host cursor is shown).

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Rusted
+Comment=Rust Wayland compositor (tiling + floating)
+Exec=rusted-wm
+Type=Application
+DesktopNames=rusted

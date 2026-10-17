@@ -1,6 +1,7 @@
 mod backend;
 mod config;
 mod control;
+mod cursor;
 mod input;
 mod layout;
 mod state;
@@ -30,7 +31,7 @@ use smithay::{
     },
 };
 
-use backend::winit::Winit;
+use backend::{tty::Tty, winit::Winit};
 use config::Config;
 use control::{Control, Reply};
 use state::{ClientState, State};
@@ -51,8 +52,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("config: {p}");
     }
 
-    let winit = Winit::new(&dh)?;
-    let output = winit.output.clone();
+    // Nested window when started inside another desktop, real display otherwise (override: --winit / --tty).
+    let arg = std::env::args().nth(1);
+    let use_tty = match arg.as_deref() {
+        Some("--tty") => true,
+        Some("--winit") => false,
+        Some(other) => return Err(format!("unknown argument {other:?} (use --winit or --tty)").into()),
+        None => std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none(),
+    };
+    tracing::info!(backend = if use_tty { "tty" } else { "winit" }, "starting");
+    let (winit, tty) = if use_tty { (None, Some(Tty::new(&dh)?)) } else { (Some(Winit::new(&dh)?), None) };
+    let output = winit.as_ref().map(|w| w.output.clone()).or_else(|| tty.as_ref().map(|t| t.output.clone())).unwrap();
+    let session = tty.as_ref().map(|t| t.session.clone());
     let mut space = Space::default();
     space.map_output(&output, (0, 0));
 
@@ -81,10 +92,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drag: None,
         output,
         config,
+        session,
+        cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
         pending_shot: None,
         running: true,
     };
-    state.seat.add_keyboard(Default::default(), 200, 25)?;
+    let input = &state.config.input;
+    let xkb = smithay::input::keyboard::XkbConfig {
+        layout: &input.layout,
+        variant: &input.variant,
+        options: (!input.options.is_empty()).then(|| input.options.clone()),
+        ..Default::default()
+    };
+    state.seat.add_keyboard(xkb, input.repeat_delay, input.repeat_rate)?;
     state.seat.add_pointer();
 
     // Wayland clients: protocol requests and new connections.
@@ -125,7 +145,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(PostAction::Continue)
     })?;
 
-    winit.register(&handle)?;
+    if let Some(winit) = winit {
+        winit.register(&handle)?;
+    }
+    if let Some(tty) = tty {
+        tty.register(&handle)?;
+        // Tell children what kind of session this is.
+        // Safety: no other threads are running yet.
+        unsafe {
+            std::env::set_var("XDG_SESSION_TYPE", "wayland");
+            std::env::set_var("XDG_CURRENT_DESKTOP", "rusted");
+        }
+    }
 
     for cmd in state.config.autostart.clone() {
         state.spawn(&cmd);
