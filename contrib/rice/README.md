@@ -40,10 +40,10 @@ Restore refuses to overwrite files that changed since installation; move those a
 - `palette.py` derives a pywal-compatible palette (`~/.cache/wal/colors.json`) from the wallpaper, using
   `wal` when installed and a Pillow extractor otherwise. Switch pywal on in Settings → Theme; `wallpaper.py`
   regenerates the palette whenever the wallpaper changes and the compositor/Waybar follow it live.
-- `fastfetch/config.jsonc` uses `logo.ansi` (a truecolor half-block portrait of the mascot, generated with
-  `fastfetch/ansi-logo.py IMAGE WIDTH OUT`; white paper is transparent). `logo.txt` is the braille RUSTED
-  emblem — point the logo block at it (type `file`) for the logo-free variant. `fastfetch.bash` shows the
-  result once in every
+- `fastfetch/config.jsonc` uses `logo.ascii` by default: a monochrome, edge-aware ASCII portrait (54x29)
+  generated with `fastfetch/ascii-logo.py IMAGE WIDTH OUT`. Alternatives: `logo.ansi` (truecolor half
+  blocks, type `file-raw`) and `logo.txt` (braille RUSTED emblem) — switch the logo block in the config.
+  `fastfetch.bash` shows the result once in every
   interactive foot shell. The installer sources that snippet from `~/.bashrc` (marker-guarded, backed up,
   `--no-bashrc` opts out); other terminals and non-interactive shells are unaffected.
 - Effects are live-reloadable: set `appearance.blur_enabled=false` (etc.) and reload. Disabling the whole
