@@ -1,3 +1,4 @@
+mod config;
 mod control;
 mod input;
 mod layout;
@@ -17,7 +18,7 @@ use smithay::{
         },
         winit::{self, WinitEvent},
     },
-    desktop::{space::render_output, Space, Window},
+    desktop::{layer_map_for_output, space::render_output, PopupManager, Space, Window},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{
         wayland_server::{Display, ListeningSocket},
@@ -25,16 +26,21 @@ use smithay::{
     },
     utils::{Rectangle, Transform},
     wayland::{
-        compositor::CompositorState, output::OutputManagerState, selection::data_device::DataDeviceState,
-        shell::xdg::XdgShellState, shm::ShmState,
+        compositor::CompositorState,
+        output::OutputManagerState,
+        selection::{
+            data_device::DataDeviceState, primary_selection::PrimarySelectionState, wlr_data_control::DataControlState,
+        },
+        shell::{wlr_layer::WlrLayerShellState, xdg::{decoration::XdgDecorationState, XdgShellState}},
+        shm::ShmState,
+        viewporter::ViewporterState,
     },
 };
 
+use config::Config;
 use control::{Control, Reply};
 use state::{ClientState, State};
 use wm::{Workspace, WORKSPACE_COUNT};
-
-const BACKGROUND: Color32F = Color32F::new(0.08, 0.08, 0.12, 1.0);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -43,6 +49,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut display: Display<State> = Display::new()?;
     let dh = display.handle();
+
+    let (config, problems) = Config::load();
+    for p in &problems {
+        tracing::warn!("config: {p}");
+    }
 
     let (mut backend, mut winit) = winit::init::<GlesRenderer>()?;
     let mode = Mode { size: backend.window_size(), refresh: 60_000 };
@@ -65,19 +76,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut seat_state = smithay::input::SeatState::new();
     let seat = seat_state.new_wl_seat(&dh, "seat0");
+    let primary_selection_state = PrimarySelectionState::new::<State>(&dh);
+    let data_control_state = DataControlState::new::<State, _>(&dh, Some(&primary_selection_state), |_| true);
     let mut state = State {
+        display_handle: dh.clone(),
         compositor_state: CompositorState::new::<State>(&dh),
         xdg_shell_state: XdgShellState::new::<State>(&dh),
+        xdg_decoration_state: XdgDecorationState::new::<State>(&dh),
+        layer_shell_state: WlrLayerShellState::new::<State>(&dh),
         shm_state: ShmState::new::<State>(&dh, vec![]),
         output_manager_state: OutputManagerState::new_with_xdg_output::<State>(&dh),
+        viewporter_state: ViewporterState::new::<State>(&dh),
         seat_state,
         data_device_state: DataDeviceState::new::<State>(&dh),
+        primary_selection_state,
+        data_control_state,
         seat,
+        popups: PopupManager::default(),
         space,
         workspaces: (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect(),
         current_ws: 0,
         drag: None,
         output: output.clone(),
+        config,
         running: true,
     };
     state.seat.add_keyboard(Default::default(), 200, 25)?;
@@ -92,6 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control = Control::bind(&socket_name)?;
     tracing::info!("control socket: {}", control.path().display());
     let mut pending_shot: Option<(std::path::PathBuf, std::os::unix::net::UnixStream)> = None;
+
+    for cmd in state.config.autostart.clone() {
+        state.spawn(&cmd);
+    }
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let start_time = std::time::Instant::now();
@@ -131,7 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 [&state.space],
                 &borders,
                 &mut damage_tracker,
-                BACKGROUND,
+                state.config.background,
             )?;
             result.damage.cloned()
         };
@@ -140,7 +165,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for window in state.space.elements() {
             window.send_frame(&output, time, Some(Duration::ZERO), |_, _| Some(output.clone()));
         }
+        for layer in layer_map_for_output(&output).layers() {
+            layer.send_frame(&output, time, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        }
         state.space.refresh();
+        state.popups.cleanup();
+        layer_map_for_output(&output).cleanup();
 
         while let Some(stream) = listener.accept()? {
             clients.push(display.handle().insert_client(stream, Arc::new(ClientState::default()))?);
@@ -154,7 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Screenshots are rendered offscreen so the window's EGL surface is left alone.
         if let Some((path, stream)) = pending_shot.take() {
-            let reply = match screenshot(backend.renderer(), &output, &state.space, &borders, &path) {
+            let reply = match screenshot(backend.renderer(), &output, &state.space, &borders, state.config.background, &path) {
                 Ok(()) => "ok".to_string(),
                 Err(e) => format!("error: {e}"),
             };
@@ -171,6 +201,7 @@ fn screenshot(
     output: &Output,
     space: &Space<Window>,
     borders: &[SolidColorRenderElement],
+    background: Color32F,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = output.current_mode().ok_or("output has no mode")?;
@@ -179,7 +210,7 @@ fn screenshot(
     let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, (w, h).into())?;
     let mut framebuffer = renderer.bind(&mut texture)?;
     let mut tracker = OutputDamageTracker::from_output(output);
-    render_output(output, renderer, &mut framebuffer, 1.0, 0, [space], borders, &mut tracker, BACKGROUND)?;
+    render_output(output, renderer, &mut framebuffer, 1.0, 0, [space], borders, &mut tracker, background)?;
 
     let mapping = renderer.copy_framebuffer(&framebuffer, Rectangle::from_size((w, h).into()), Fourcc::Abgr8888)?;
     let bytes = renderer.map_texture(&mapping)?;

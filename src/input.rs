@@ -1,7 +1,5 @@
 //! Input handling: keybinds, pointer focus, click-to-focus.
 
-use std::process::Command;
-
 use smithay::{
     backend::{
         input::{
@@ -10,21 +8,23 @@ use smithay::{
         },
         winit::WinitInput,
     },
-    desktop::WindowSurfaceType,
+    desktop::{layer_map_for_output, PopupKind, PopupManager, WindowSurfaceType},
     input::{
-        keyboard::{keysyms, FilterResult},
+        keyboard::FilterResult,
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     utils::{Logical, Point, SERIAL_COUNTER},
     reexports::wayland_server::protocol::wl_surface::WlSurface,
+    wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
-use crate::{state::State, wm::DragKind};
+use crate::{config::normalize_sym, state::State, wm::DragKind};
 
 /// Compositor actions triggered by keybinds (and by the debug control socket).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Action {
-    Spawn,
+    Exec(String),
+    Reload,
     Close,
     FocusNext,
     FocusDir(i32, i32),
@@ -36,10 +36,6 @@ pub enum Action {
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
-
-fn workspace_index(sym: u32) -> Option<usize> {
-    (keysyms::KEY_1..=keysyms::KEY_9).contains(&sym).then(|| (sym - keysyms::KEY_1) as usize)
-}
 
 impl State {
     pub fn handle_input(&mut self, event: InputEvent<WinitInput>) {
@@ -61,26 +57,13 @@ impl State {
 
     fn on_keyboard(&mut self, code: smithay::input::keyboard::Keycode, key_state: KeyState, time: u32) {
         let keyboard = self.seat.get_keyboard().unwrap();
-        let action = keyboard.input::<Action, _>(self, code, key_state, SERIAL_COUNTER.next_serial(), time, |_, mods, handle| {
-            // Nested in another compositor Super is usually taken, so Alt is the modifier for now.
-            if key_state == KeyState::Pressed && mods.alt {
-                // Raw (unshifted) symbol, so Alt+Shift+1 is still "1".
+        let action = keyboard.input::<Action, _>(self, code, key_state, SERIAL_COUNTER.next_serial(), time, |state, mods, handle| {
+            if key_state == KeyState::Pressed {
+                // Raw (unshifted) symbol, so e.g. Shift+1 is still "1".
                 let sym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or(handle.modified_sym()).raw();
-                let action = match sym {
-                    keysyms::KEY_Return => Some(Action::Spawn),
-                    keysyms::KEY_q => Some(Action::Close),
-                    keysyms::KEY_Tab => Some(Action::FocusNext),
-                    keysyms::KEY_e if mods.shift => Some(Action::Quit),
-                    keysyms::KEY_f => Some(Action::ToggleFloating),
-                    keysyms::KEY_h => Some(Action::FocusDir(-1, 0)),
-                    keysyms::KEY_l => Some(Action::FocusDir(1, 0)),
-                    keysyms::KEY_k => Some(Action::FocusDir(0, -1)),
-                    keysyms::KEY_j => Some(Action::FocusDir(0, 1)),
-                    s => workspace_index(s)
-                        .map(|n| if mods.shift { Action::MoveToWorkspace(n) } else { Action::Workspace(n) }),
-                };
-                if let Some(a) = action {
-                    return FilterResult::Intercept(a);
+                let sym = normalize_sym(sym);
+                if let Some(b) = state.config.bindings.iter().find(|b| b.matches(mods, sym)) {
+                    return FilterResult::Intercept(b.action.clone());
                 }
             }
             FilterResult::Forward
@@ -93,11 +76,9 @@ impl State {
     pub fn run_action(&mut self, action: Action) {
         tracing::debug!(?action, "keybind");
         match action {
-            Action::Spawn => {
-                let term = std::env::var("RUSTED_TERMINAL").unwrap_or_else(|_| "konsole".into());
-                if let Err(e) = Command::new(&term).env("QT_QPA_PLATFORM", "wayland").spawn() {
-                    tracing::error!("failed to spawn {term}: {e}");
-                }
+            Action::Exec(cmd) => self.spawn(&cmd),
+            Action::Reload => {
+                self.reload_config();
             }
             Action::Close => {
                 if let Some(toplevel) = self.focused_window().and_then(|w| w.toplevel().cloned()) {
@@ -113,11 +94,28 @@ impl State {
         }
     }
 
-    /// Surface under `pos` with its origin in global coordinates.
+    /// Surface under `pos` with its origin in global coordinates. Overlay/top layer surfaces
+    /// (bars, launchers) are above windows, bottom/background ones below.
     fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let (window, loc) = self.space.element_under(pos)?;
-        let (surface, offset) = window.surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL)?;
-        Some((surface, (loc + offset).to_f64()))
+        let output_loc = self.space.output_geometry(&self.output)?.loc;
+        let map = layer_map_for_output(&self.output);
+        let layer_hit = |layers: &[WlrLayer]| {
+            layers.iter().find_map(|&l| {
+                let layer = map.layer_under(l, pos - output_loc.to_f64())?;
+                let geo = map.layer_geometry(layer)?;
+                let (surface, offset) = layer.surface_under(pos - output_loc.to_f64() - geo.loc.to_f64(), WindowSurfaceType::ALL)?;
+                Some((surface, (output_loc + geo.loc + offset).to_f64()))
+            })
+        };
+        if let Some(hit) = layer_hit(&[WlrLayer::Overlay, WlrLayer::Top]) {
+            return Some(hit);
+        }
+        if let Some((window, loc)) = self.space.element_under(pos) {
+            if let Some((surface, offset)) = window.surface_under(pos - loc.to_f64(), WindowSurfaceType::ALL) {
+                return Some((surface, (loc + offset).to_f64()));
+            }
+        }
+        layer_hit(&[WlrLayer::Bottom, WlrLayer::Background])
     }
 
     pub fn move_pointer(&mut self, pos: Point<f64, Logical>, time: u32) {
@@ -131,6 +129,21 @@ impl State {
         };
         pointer.motion(self, focus, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
         pointer.frame(self);
+    }
+
+    /// Poor man's popup grab: a click outside every popup of the focused window closes its menus.
+    fn dismiss_popups_outside(&mut self, pos: Point<f64, Logical>) {
+        let Some(root) = self.seat.get_keyboard().unwrap().current_focus() else { return };
+        let popups: Vec<PopupKind> = PopupManager::popups_for_surface(&root).map(|(p, _)| p).collect();
+        if popups.is_empty() {
+            return;
+        }
+        let hit = self.surface_under(pos).map(|(s, _)| s);
+        if !popups.iter().any(|p| Some(p.wl_surface()) == hit.as_ref()) {
+            for popup in &popups {
+                let _ = PopupManager::dismiss_popup(&root, popup);
+            }
+        }
     }
 
     pub fn on_button(&mut self, button: u32, state: ButtonState, time: u32) {
@@ -150,7 +163,17 @@ impl State {
         }
 
         if state == ButtonState::Pressed {
-            if let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) {
+            self.dismiss_popups_outside(pos);
+            let layer = {
+                let map = layer_map_for_output(&self.output);
+                let hit = [WlrLayer::Overlay, WlrLayer::Top, WlrLayer::Bottom, WlrLayer::Background]
+                    .iter()
+                    .find_map(|&l| map.layer_under(l, pos).cloned());
+                hit.filter(|l| l.can_receive_keyboard_focus())
+            };
+            if let Some(layer) = layer {
+                self.focus_surface(layer.wl_surface().clone());
+            } else if let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) {
                 self.focus_window(&window);
             }
         }

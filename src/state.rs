@@ -2,21 +2,23 @@
 
 use std::os::unix::io::OwnedFd;
 
-use crate::wm::{Drag, Workspace};
-
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
+    delegate_compositor, delegate_data_control, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration,
     delegate_xdg_shell,
-    desktop::{Space, Window},
+    desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
-        wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_protocols::xdg::{
+            decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
+            shell::server::xdg_toplevel,
+        },
         wayland_server::{
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
-            Client,
+            protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
+            Client, DisplayHandle, Resource,
         },
     },
     utils::Serial,
@@ -25,29 +27,58 @@ use smithay::{
         compositor::{get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
         selection::{
-            data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler},
+            data_device::{
+                set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+                ServerDndGrabHandler,
+            },
+            primary_selection::{set_primary_focus, PrimarySelectionHandler, PrimarySelectionState},
+            wlr_data_control::{DataControlHandler, DataControlState},
             SelectionHandler,
         },
-        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+        shell::{
+            wlr_layer::{
+                Layer, KeyboardInteractivity, WlrLayerShellHandler, WlrLayerShellState,
+            },
+            xdg::{
+                decoration::{XdgDecorationHandler, XdgDecorationState},
+                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            },
+        },
         shm::{ShmHandler, ShmState},
+        viewporter::ViewporterState,
     },
 };
 
+use crate::{
+    config::Config,
+    wm::{Drag, Workspace},
+};
+
 pub struct State {
+    pub display_handle: DisplayHandle,
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    #[allow(dead_code)] // keeps the xdg-decoration global alive
+    pub xdg_decoration_state: XdgDecorationState,
+    pub layer_shell_state: WlrLayerShellState,
     pub shm_state: ShmState,
     #[allow(dead_code)] // keeps the xdg-output global alive
     pub output_manager_state: OutputManagerState,
+    #[allow(dead_code)] // keeps the viewporter global alive
+    pub viewporter_state: ViewporterState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
+    pub primary_selection_state: PrimarySelectionState,
+    pub data_control_state: DataControlState,
     pub seat: Seat<Self>,
+    pub popups: PopupManager,
 
     pub space: Space<Window>,
     pub workspaces: Vec<Workspace>,
     pub current_ws: usize,
     pub drag: Option<Drag>,
     pub output: Output,
+    pub config: Config,
     pub running: bool,
 }
 
@@ -76,6 +107,11 @@ impl State {
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
     }
+
+    fn layer_for_surface(&self, surface: &WlSurface) -> Option<LayerSurface> {
+        let map = layer_map_for_output(&self.output);
+        map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL).cloned()
+    }
 }
 
 impl BufferHandler for State {
@@ -93,6 +129,8 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        self.popups.commit(surface);
+        self.ensure_popup_configured(surface);
 
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
@@ -101,6 +139,33 @@ impl CompositorHandler for State {
             }
             if let Some(window) = self.window_for_surface(&root) {
                 window.on_commit();
+            }
+            if let Some(layer) = self.layer_for_surface(&root) {
+                // Bars may change the usable area, so re-arrange and re-tile.
+                layer_map_for_output(&self.output).arrange();
+                // arrange() never sends the initial configure itself; this sends it (and any other
+                // pending change) so the client can map.
+                layer.layer_surface().send_pending_configure();
+                self.relayout();
+                if layer.can_receive_keyboard_focus()
+                    && layer.cached_state().keyboard_interactivity == KeyboardInteractivity::Exclusive
+                    && self.seat.get_keyboard().unwrap().current_focus().as_ref() != Some(layer.wl_surface())
+                {
+                    self.focus_surface(layer.wl_surface().clone());
+                }
+            }
+        }
+    }
+}
+
+impl State {
+    /// xdg popups must get an initial configure after their first commit.
+    fn ensure_popup_configured(&mut self, surface: &WlSurface) {
+        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
+            if !popup.is_initial_configure_sent() {
+                if let Err(e) = popup.send_configure() {
+                    tracing::warn!("popup initial configure failed: {e:?}");
+                }
             }
         }
     }
@@ -129,21 +194,80 @@ impl XdgShellHandler for State {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         // The window may live on a workspace that is not currently mapped.
-        let window = self
-            .workspaces
-            .iter()
-            .flat_map(|ws| ws.entries.iter())
-            .map(|e| &e.window)
-            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface.wl_surface()))
-            .cloned();
-        if let Some(window) = window {
+        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.remove_window(&window);
         }
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        surface.with_pending_state(|s| s.geometry = positioner.get_geometry());
+        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            tracing::warn!("failed to track popup: {e:?}");
+        }
+    }
+
+    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+        surface.with_pending_state(|s| {
+            s.geometry = positioner.get_geometry();
+            s.positioner = positioner;
+        });
+        surface.send_repositioned(token);
+    }
+
+    // Popup grabs (click outside dismisses a menu) are not implemented yet; menus still work and
+    // are closed by their client.
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
-    fn reposition_request(&mut self, _surface: PopupSurface, _positioner: PositionerState, _token: u32) {}
+}
+
+impl XdgDecorationHandler for State {
+    // A tiling compositor draws no title bars: tell clients to skip theirs.
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        set_server_side(&toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        set_server_side(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        set_server_side(&toplevel);
+    }
+}
+
+fn set_server_side(toplevel: &ToplevelSurface) {
+    toplevel.with_pending_state(|s| s.decoration_mode = Some(DecorationMode::ServerSide));
+    if toplevel.is_initial_configure_sent() {
+        toplevel.send_pending_configure();
+    }
+}
+
+impl WlrLayerShellHandler for State {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell_state
+    }
+
+    fn new_layer_surface(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface, _output: Option<WlOutput>, _layer: Layer, namespace: String) {
+        tracing::info!(%namespace, "new layer surface");
+        let layer = LayerSurface::new(surface, namespace);
+        if let Err(e) = layer_map_for_output(&self.output).map_layer(&layer) {
+            tracing::warn!("failed to map layer surface: {e}");
+        }
+    }
+
+    fn layer_destroyed(&mut self, surface: smithay::wayland::shell::wlr_layer::LayerSurface) {
+        let layer = layer_map_for_output(&self.output)
+            .layers()
+            .find(|l| l.layer_surface() == &surface)
+            .cloned();
+        if let Some(layer) = layer {
+            let had_focus = self.seat.get_keyboard().unwrap().current_focus().as_ref() == Some(layer.wl_surface());
+            layer_map_for_output(&self.output).unmap_layer(&layer);
+            self.relayout();
+            if had_focus {
+                self.focus_top();
+            }
+        }
+    }
 }
 
 impl SeatHandler for State {
@@ -155,7 +279,13 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    // Clipboard and primary selection follow keyboard focus.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|s| self.display_handle.get_client(s.id()).ok());
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
+    }
+
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
 }
 
@@ -169,6 +299,18 @@ impl DataDeviceHandler for State {
     }
 }
 
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
+impl DataControlHandler for State {
+    fn data_control_state(&self) -> &DataControlState {
+        &self.data_control_state
+    }
+}
+
 impl ClientDndGrabHandler for State {}
 impl ServerDndGrabHandler for State {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
@@ -177,6 +319,11 @@ impl ServerDndGrabHandler for State {
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_output!(State);
+delegate_viewporter!(State);
 delegate_xdg_shell!(State);
+delegate_xdg_decoration!(State);
+delegate_layer_shell!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
+delegate_primary_selection!(State);
+delegate_data_control!(State);

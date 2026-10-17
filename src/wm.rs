@@ -5,7 +5,8 @@ use smithay::{
         solid::{SolidColorBuffer, SolidColorRenderElement},
         Kind,
     },
-    desktop::{space::RenderZindex, Window},
+    desktop::{layer_map_for_output, space::RenderZindex, Window},
+    reexports::wayland_server::protocol::wl_surface::WlSurface,
     reexports::wayland_protocols::xdg::shell::server::xdg_toplevel,
     utils::{Logical, Point, SERIAL_COUNTER},
 };
@@ -16,11 +17,7 @@ use crate::{
 };
 
 pub const WORKSPACE_COUNT: usize = 9;
-pub const GAP: i32 = 12;
-pub const BORDER: i32 = 2;
 const MIN_FLOAT_SIZE: (i32, i32) = (120, 80);
-const COLOR_FOCUSED: [f32; 4] = [0.45, 0.65, 1.0, 1.0];
-const COLOR_UNFOCUSED: [f32; 4] = [0.25, 0.27, 0.35, 1.0];
 
 const Z_TILED: u8 = RenderZindex::Shell as u8;
 const Z_FLOATING: u8 = RenderZindex::Shell as u8 + 1;
@@ -59,8 +56,11 @@ pub struct Drag {
 }
 
 impl State {
+    /// Area available for windows: the output minus bars' exclusive zones (layer-shell).
     fn area(&self) -> Rect {
-        self.space.output_geometry(&self.output).unwrap_or_default()
+        let out = self.space.output_geometry(&self.output).unwrap_or_default();
+        let zone = layer_map_for_output(&self.output).non_exclusive_zone();
+        Rect::new(out.loc + zone.loc, zone.size)
     }
 
     pub fn ws(&self) -> &Workspace {
@@ -98,7 +98,7 @@ impl State {
     /// Apply the layout of the current workspace: tile, place floating windows, configure clients.
     pub fn relayout(&mut self) {
         let area = self.area();
-        let gap = GAP;
+        let gap = self.config.general.gap;
         let tiled_count = self.ws().entries.iter().filter(|e| !e.floating).count();
         let mut tiles = layout::dwindle(area, tiled_count, gap).into_iter();
 
@@ -143,6 +143,12 @@ impl State {
             let keyboard = self.seat.get_keyboard().unwrap();
             keyboard.set_focus(self, Some(toplevel.wl_surface().clone()), SERIAL_COUNTER.next_serial());
         }
+    }
+
+    /// Give keyboard focus to an arbitrary surface (e.g. a layer-shell launcher).
+    pub fn focus_surface(&mut self, surface: WlSurface) {
+        let keyboard = self.seat.get_keyboard().unwrap();
+        keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
     }
 
     pub fn focused_window(&self) -> Option<Window> {
@@ -299,11 +305,12 @@ impl State {
     pub fn border_elements(&mut self) -> Vec<SolidColorRenderElement> {
         let focused = self.focused_window();
         let mut out = Vec::new();
-        let b = BORDER;
+        let b = self.config.general.border;
+        let (focused_color, unfocused_color) = (self.config.focused, self.config.unfocused);
         for i in 0..self.workspaces[self.current_ws].entries.len() {
             let window = self.workspaces[self.current_ws].entries[i].window.clone();
             let Some(g) = self.space.element_geometry(&window) else { continue };
-            let color = if focused.as_ref() == Some(&window) { COLOR_FOCUSED } else { COLOR_UNFOCUSED };
+            let color = if focused.as_ref() == Some(&window) { focused_color } else { unfocused_color };
             // (x, y, w, h) of top, bottom, left, right
             let strips = [
                 (g.loc.x - b, g.loc.y - b, g.size.w + 2 * b, b),
@@ -318,5 +325,38 @@ impl State {
             }
         }
         out
+    }
+}
+
+// ---- config / processes ----
+
+impl State {
+    /// Re-read the config file and apply it to the running compositor.
+    pub fn reload_config(&mut self) -> Vec<String> {
+        let (config, problems) = crate::config::Config::load();
+        for p in &problems {
+            tracing::warn!("config: {p}");
+        }
+        self.config = config;
+        self.relayout();
+        tracing::info!("config reloaded from {}", crate::config::Config::path().display());
+        problems
+    }
+
+    /// Run a shell command detached from the compositor (reaped in the background).
+    pub fn spawn(&self, command: &str) {
+        match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("exec {command}"))
+            .env("QT_QPA_PLATFORM", "wayland")
+            .spawn()
+        {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => tracing::error!("failed to spawn {command:?}: {e}"),
+        }
     }
 }
