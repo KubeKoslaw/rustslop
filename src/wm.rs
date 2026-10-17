@@ -21,10 +21,13 @@ const MIN_FLOAT_SIZE: (i32, i32) = (120, 80);
 
 const Z_TILED: u8 = RenderZindex::Shell as u8;
 const Z_FLOATING: u8 = RenderZindex::Shell as u8 + 1;
+/// Above the Top layer (bars) but below Overlay.
+const Z_FULLSCREEN: u8 = RenderZindex::Top as u8 + 10;
 
 pub struct Entry {
     pub window: Window,
     pub floating: bool,
+    pub fullscreen: bool,
     pub float_rect: Rect,
     /// top, bottom, left, right
     borders: [SolidColorBuffer; 4],
@@ -32,7 +35,7 @@ pub struct Entry {
 
 impl Entry {
     fn new(window: Window, floating: bool, float_rect: Rect) -> Self {
-        Self { window, floating, float_rect, borders: Default::default() }
+        Self { window, floating, fullscreen: false, float_rect, borders: Default::default() }
     }
 }
 
@@ -99,16 +102,29 @@ impl State {
     pub fn relayout(&mut self) {
         let area = self.area();
         let gap = self.config.general.gap;
-        let tiled_count = self.ws().entries.iter().filter(|e| !e.floating).count();
-        let mut tiles = layout::dwindle(area, tiled_count, gap).into_iter();
+        let tiled_count = self.ws().entries.iter().filter(|e| !e.floating && !e.fullscreen).count();
+        let mut tiles = layout::dwindle(area, tiled_count, gap, self.split_ratio).into_iter();
+        let full = self.space.output_geometry(&self.output).unwrap_or_default();
 
         let mut targets: Vec<(Window, Rect)> = Vec::new();
         for entry in &self.workspaces[self.current_ws].entries {
-            let rect = if entry.floating { entry.float_rect } else { tiles.next().unwrap_or(area) };
+            let rect = if entry.fullscreen {
+                full
+            } else if entry.floating {
+                entry.float_rect
+            } else {
+                tiles.next().unwrap_or(area)
+            };
             if let Some(toplevel) = entry.window.toplevel() {
-                let tiled = !entry.floating;
+                let tiled = !entry.floating && !entry.fullscreen;
+                let fullscreen = entry.fullscreen;
                 toplevel.with_pending_state(|s| {
                     s.size = Some(rect.size);
+                    if fullscreen {
+                        s.states.set(xdg_toplevel::State::Fullscreen);
+                    } else {
+                        s.states.unset(xdg_toplevel::State::Fullscreen);
+                    }
                     for st in [
                         xdg_toplevel::State::TiledLeft,
                         xdg_toplevel::State::TiledRight,
@@ -175,16 +191,13 @@ impl State {
         }
     }
 
-    /// Focus the nearest window in direction (dx, dy), each in {-1, 0, 1}.
-    pub fn focus_dir(&mut self, dx: i32, dy: i32) {
-        let Some(current) = self.focused_window() else { return };
-        let Some(cur) = self.space.element_geometry(&current) else { return };
+    /// Nearest window of the current workspace in direction (dx, dy), each in {-1, 0, 1}.
+    fn neighbor(&self, current: &Window, dx: i32, dy: i32) -> Option<Window> {
+        let cur = self.space.element_geometry(current)?;
         let c = Point::<i32, Logical>::from((cur.loc.x + cur.size.w / 2, cur.loc.y + cur.size.h / 2));
-
-        let best = self
-            .space
+        self.space
             .elements()
-            .filter(|w| **w != current)
+            .filter(|w| *w != current)
             .filter_map(|w| {
                 let g = self.space.element_geometry(w)?;
                 let p = Point::<i32, Logical>::from((g.loc.x + g.size.w / 2, g.loc.y + g.size.h / 2));
@@ -197,9 +210,64 @@ impl State {
                 Some((along + 2 * across, w.clone()))
             })
             .min_by_key(|(score, _)| *score)
-            .map(|(_, w)| w);
-        if let Some(w) = best {
+            .map(|(_, w)| w)
+    }
+
+    /// Focus the nearest window in direction (dx, dy).
+    pub fn focus_dir(&mut self, dx: i32, dy: i32) {
+        let Some(current) = self.focused_window() else { return };
+        if let Some(w) = self.neighbor(&current, dx, dy) {
             self.focus_window(&w);
+        }
+    }
+
+    /// Swap the focused tiled window with its neighbour in a direction; focus stays on it.
+    pub fn swap_dir(&mut self, dx: i32, dy: i32) {
+        let Some(current) = self.focused_window() else { return };
+        let Some(other) = self.neighbor(&current, dx, dy) else { return };
+        let entries = &mut self.workspaces[self.current_ws].entries;
+        let (Some(a), Some(b)) = (
+            entries.iter().position(|e| e.window == current),
+            entries.iter().position(|e| e.window == other),
+        ) else {
+            return;
+        };
+        if entries[a].floating || entries[b].floating || entries[a].fullscreen || entries[b].fullscreen {
+            return;
+        }
+        entries.swap(a, b);
+        self.relayout();
+    }
+
+    /// Grow/shrink the first window's share of each split.
+    pub fn adjust_ratio(&mut self, delta: f32) {
+        self.split_ratio = (self.split_ratio + delta).clamp(layout::MIN_RATIO, layout::MAX_RATIO);
+        self.relayout();
+    }
+
+    pub fn toggle_fullscreen(&mut self) {
+        let Some(window) = self.focused_window() else { return };
+        let now = self.ws().entries.iter().find(|e| e.window == window).is_some_and(|e| e.fullscreen);
+        self.set_fullscreen(&window, !now);
+    }
+
+    /// Fullscreen on/off for a window on any workspace (also used for client requests).
+    pub fn set_fullscreen(&mut self, window: &Window, on: bool) {
+        let Some(entry) = self.workspaces.iter_mut().flat_map(|ws| ws.entries.iter_mut()).find(|e| &e.window == window)
+        else {
+            return;
+        };
+        entry.fullscreen = on;
+        window.override_z_index(if on {
+            Z_FULLSCREEN
+        } else if entry.floating {
+            Z_FLOATING
+        } else {
+            Z_TILED
+        });
+        self.relayout();
+        if on {
+            self.focus_window(window);
         }
     }
 
@@ -208,6 +276,9 @@ impl State {
         let area = self.area();
         let geo = self.space.element_geometry(&window);
         let Some(entry) = self.entry_mut(&window) else { return };
+        if entry.fullscreen {
+            return;
+        }
         entry.floating = !entry.floating;
         if entry.floating {
             // Keep the window where it is but shrink it a bit so the change is visible.
@@ -303,11 +374,18 @@ impl State {
 
     /// Border strips drawn just outside every window of the current workspace.
     pub fn border_elements(&mut self) -> Vec<SolidColorRenderElement> {
+        // Borders are drawn above all windows, so hide them while something is fullscreen.
+        if self.ws().entries.iter().any(|e| e.fullscreen) {
+            return Vec::new();
+        }
         let focused = self.focused_window();
         let mut out = Vec::new();
         let b = self.config.general.border;
         let (focused_color, unfocused_color) = (self.config.focused, self.config.unfocused);
         for i in 0..self.workspaces[self.current_ws].entries.len() {
+            if self.workspaces[self.current_ws].entries[i].fullscreen {
+                continue;
+            }
             let window = self.workspaces[self.current_ws].entries[i].window.clone();
             let Some(g) = self.space.element_geometry(&window) else { continue };
             let color = if focused.as_ref() == Some(&window) { focused_color } else { unfocused_color };
@@ -337,6 +415,7 @@ impl State {
         for p in &problems {
             tracing::warn!("config: {p}");
         }
+        self.split_ratio = config.general.split_ratio;
         self.config = config;
         self.relayout();
         tracing::info!("config reloaded from {}", crate::config::Config::path().display());

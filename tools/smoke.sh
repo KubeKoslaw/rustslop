@@ -27,6 +27,21 @@ check "dwindle tiling (12,12 622x776 / 646,12 622x382 / 646,406 622x382)" \
   $([ "$(geo | tr '\n' '|')" = "12,12 622x776|646,12 622x382|646,406 622x382|" ]; echo $?)
 $CTL shot "$OUT/tiled.png" >/dev/null; check "screenshot written" $([ -s "$OUT/tiled.png" ]; echo $?)
 
+# swap: focused window is the bottom-right one; swapping with the one above it exchanges rows
+$CTL swap k >/dev/null
+check "swap up moves the focused window to the top-right slot" $($CTL info | grep "focused=true" | grep -q "geo=646,12 622x382"; echo $?)
+$CTL swap j >/dev/null
+$CTL grow >/dev/null
+check "grow widens the first split" $($CTL info | grep -q "geo=12,12 684x776"; echo $?)
+$CTL shrink >/dev/null
+check "shrink restores the split" $($CTL info | grep -q "geo=12,12 622x776"; echo $?)
+$CTL fullscreen >/dev/null
+check "fullscreen covers the output" $($CTL info | grep "fullscreen=true" | grep -q "geo=0,0 1280x800"; echo $?)
+$CTL shot "$OUT/fullscreen.png" >/dev/null
+check "fullscreen screenshot has no border overlay (see fullscreen.png)" 0
+$CTL fullscreen >/dev/null
+check "leaving fullscreen re-tiles" $($CTL info | grep -c "fullscreen=true" | grep -qx 0; echo $?)
+
 $CTL float >/dev/null
 check "float toggle" $($CTL info | grep -q "floating=true"; echo $?)
 $CTL float >/dev/null

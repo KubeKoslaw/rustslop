@@ -101,6 +101,16 @@ impl State {
             Some("close") => self.run_action(Action::Close),
             Some("next") => self.run_action(Action::FocusNext),
             Some("float") => self.run_action(Action::ToggleFloating),
+            Some("fullscreen") => self.run_action(Action::ToggleFullscreen),
+            Some("grow") => self.run_action(Action::Resize(0.05)),
+            Some("shrink") => self.run_action(Action::Resize(-0.05)),
+            Some("swap") => match parts.get(1).copied() {
+                Some("h") => self.run_action(Action::SwapDir(-1, 0)),
+                Some("l") => self.run_action(Action::SwapDir(1, 0)),
+                Some("k") => self.run_action(Action::SwapDir(0, -1)),
+                Some("j") => self.run_action(Action::SwapDir(0, 1)),
+                _ => return err("swap h|j|k|l"),
+            },
             Some("quit") => self.run_action(Action::Quit),
             Some("focus") => match parts.get(1).copied() {
                 Some("h") => self.run_action(Action::FocusDir(-1, 0)),
@@ -146,7 +156,7 @@ impl State {
             },
             Some("shot") if parts.len() == 2 => return Reply::Screenshot(PathBuf::from(parts[1])),
             Some("info") => return Reply::Text(self.describe()),
-            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH, info)"),
+            _ => return err("unknown command (spawn, exec CMD.., reload, close, next, float, fullscreen, grow, shrink, swap h|j|k|l, quit, focus hjkl, ws N, mv N, motion X Y, click X Y [right], drag move|resize X1 Y1 X2 Y2, shot PATH, info)"),
         }
         ok()
     }
@@ -178,8 +188,9 @@ impl State {
                 });
                 let geo = if i == self.current_ws { self.space.element_geometry(&e.window) } else { None };
                 out += &format!(
-                    "  - app_id={app_id:?} title={title:?} floating={} focused={} activated={} geo={}\n",
+                    "  - app_id={app_id:?} title={title:?} floating={} fullscreen={} focused={} activated={} geo={}\n",
                     e.floating,
+                    e.fullscreen,
                     focused.as_ref() == Some(&e.window),
                     activated,
                     geo.map(|g| format!("{},{} {}x{}", g.loc.x, g.loc.y, g.size.w, g.size.h)).unwrap_or_else(|| "unmapped".into()),
