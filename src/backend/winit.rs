@@ -1,24 +1,19 @@
 //! Nested backend: the compositor runs as a window inside another Wayland/X11 session.
 
-use std::{path::Path, time::Duration};
+use std::time::Duration;
 
 use smithay::{
     backend::{
-        allocator::Fourcc,
-        renderer::{
-            damage::OutputDamageTracker, element::solid::SolidColorRenderElement, gles::{GlesRenderer, GlesTexture},
-            Bind, Color32F, ExportMem, Offscreen,
-        },
+        renderer::{damage::OutputDamageTracker, gles::GlesRenderer},
         winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
     },
-    desktop::{layer_map_for_output, space::render_output, Space, Window},
+    desktop::{layer_map_for_output, space::render_output},
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::calloop::{
         timer::{TimeoutAction, Timer},
         LoopHandle,
     },
-    utils::{Rectangle, Transform},
-    wayland::output::OutputManagerState,
+    utils::Transform,
 };
 
 use crate::{control, state::State};
@@ -118,7 +113,7 @@ fn frame(
 
     // Screenshots are rendered offscreen so the window's EGL surface is left alone.
     if let Some((path, stream)) = state.pending_shot.take() {
-        let reply = match screenshot(backend.renderer(), output, &state.space, &borders, background, &path) {
+        let reply = match super::screenshot(backend.renderer(), output, &state.space, &borders, background, &path) {
             Ok(()) => "ok".to_string(),
             Err(e) => format!("error: {e}"),
         };
@@ -126,37 +121,3 @@ fn frame(
     }
     Ok(())
 }
-
-/// Render the output into an offscreen texture, read it back and write a PNG.
-fn screenshot(
-    renderer: &mut GlesRenderer,
-    output: &Output,
-    space: &Space<Window>,
-    borders: &[SolidColorRenderElement],
-    background: Color32F,
-    path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mode = output.current_mode().ok_or("output has no mode")?;
-    let (w, h) = (mode.size.w, mode.size.h);
-
-    let mut texture: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, (w, h).into())?;
-    let mut framebuffer = renderer.bind(&mut texture)?;
-    let mut tracker = OutputDamageTracker::from_output(output);
-    render_output(output, renderer, &mut framebuffer, 1.0, 0, [space], borders, &mut tracker, background)?;
-
-    let mapping = renderer.copy_framebuffer(&framebuffer, Rectangle::from_size((w, h).into()), Fourcc::Abgr8888)?;
-    let bytes = renderer.map_texture(&mapping)?;
-
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), w as u32, h as u32);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    // GL reads back bottom-up and the output is Flipped180: flip rows so the PNG is upright.
-    let stride = w as usize * 4;
-    let upright: Vec<u8> = bytes.chunks_exact(stride).rev().flatten().copied().collect();
-    encoder.write_header()?.write_image_data(&upright)?;
-    Ok(())
-}
-
-// Keep the xdg-output manager type referenced so a future multi-output refactor can find it here.
-#[allow(dead_code)]
-type _OutputManager = OutputManagerState;

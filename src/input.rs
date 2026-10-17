@@ -3,14 +3,13 @@
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent, KeyState,
+            AbsolutePositionEvent, Axis, Device, DeviceCapability, PointerMotionEvent, AxisSource, ButtonState, Event, InputBackend, InputEvent, KeyState,
             KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
         },
-        winit::WinitInput,
     },
     desktop::{layer_map_for_output, PopupKind, PopupManager, WindowSurfaceType},
     input::{
-        keyboard::FilterResult,
+        keyboard::{keysyms, FilterResult},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
     utils::{Logical, Point, SERIAL_COUNTER},
@@ -18,6 +17,7 @@ use smithay::{
     wayland::shell::wlr_layer::Layer as WlrLayer,
 };
 
+use smithay::backend::session::Session as _;
 use crate::{config::normalize_sym, state::State, wm::DragKind};
 
 /// Compositor actions triggered by keybinds (and by the debug control socket).
@@ -31,6 +31,7 @@ pub enum Action {
     ToggleFloating,
     Workspace(usize),
     MoveToWorkspace(usize),
+    SwitchVt(i32),
     Quit,
 }
 
@@ -38,7 +39,10 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 
 impl State {
-    pub fn handle_input(&mut self, event: InputEvent<WinitInput>) {
+    pub fn handle_input<B: InputBackend>(&mut self, event: InputEvent<B>)
+    where
+        B::Device: 'static,
+    {
         match event {
             InputEvent::Keyboard { event } => self.on_keyboard(event.key_code(), event.state(), event.time_msec()),
             InputEvent::PointerMotionAbsolute { event } => {
@@ -49,8 +53,18 @@ impl State {
                 ));
                 self.move_pointer(pos, event.time_msec());
             }
+            InputEvent::PointerMotion { event } => {
+                let Some(geo) = self.space.output_geometry(&self.output) else { return };
+                let cur = self.seat.get_pointer().unwrap().current_location();
+                let pos = Point::<f64, Logical>::from((
+                    (cur.x + event.delta_x()).clamp(geo.loc.x as f64, (geo.loc.x + geo.size.w - 1) as f64),
+                    (cur.y + event.delta_y()).clamp(geo.loc.y as f64, (geo.loc.y + geo.size.h - 1) as f64),
+                ));
+                self.move_pointer(pos, event.time_msec());
+            }
             InputEvent::PointerButton { event } => self.on_button(event.button_code(), event.state(), event.time_msec()),
-            InputEvent::PointerAxis { event } => self.on_axis::<WinitInput>(event),
+            InputEvent::PointerAxis { event } => self.on_axis::<B>(event),
+            InputEvent::DeviceAdded { device } => self.configure_device(&device),
             _ => {}
         }
     }
@@ -59,6 +73,11 @@ impl State {
         let keyboard = self.seat.get_keyboard().unwrap();
         let action = keyboard.input::<Action, _>(self, code, key_state, SERIAL_COUNTER.next_serial(), time, |state, mods, handle| {
             if key_state == KeyState::Pressed {
+                // Ctrl+Alt+F1..F12 arrive as XF86Switch_VT_n.
+                let modified = handle.modified_sym().raw();
+                if (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12).contains(&modified) {
+                    return FilterResult::Intercept(Action::SwitchVt((modified - keysyms::KEY_XF86Switch_VT_1 + 1) as i32));
+                }
                 // Raw (unshifted) symbol, so e.g. Shift+1 is still "1".
                 let sym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or(handle.modified_sym()).raw();
                 let sym = normalize_sym(sym);
@@ -90,6 +109,13 @@ impl State {
             Action::ToggleFloating => self.toggle_floating(),
             Action::Workspace(n) => self.switch_workspace(n),
             Action::MoveToWorkspace(n) => self.move_to_workspace(n),
+            Action::SwitchVt(vt) => {
+                if let Some(session) = &mut self.session {
+                    if let Err(e) = session.change_vt(vt) {
+                        tracing::warn!("VT switch to {vt} failed: {e}");
+                    }
+                }
+            }
             Action::Quit => self.running = false,
         }
     }
@@ -201,5 +227,26 @@ impl State {
         let pointer = self.seat.get_pointer().unwrap();
         pointer.axis(self, frame);
         pointer.frame(self);
+    }
+}
+
+impl State {
+    /// Apply touchpad settings from the config to a newly added libinput device. Other backends
+    /// (winit) hand us devices that are not libinput ones, which is fine: nothing happens.
+    fn configure_device<D: Device + 'static>(&self, device: &D) {
+        use smithay::reexports::input::Device as LibinputDevice;
+        if !device.has_capability(DeviceCapability::Pointer) {
+            return;
+        }
+        let any: &dyn std::any::Any = device;
+        if let Some(dev) = any.downcast_ref::<LibinputDevice>() {
+            let mut dev = dev.clone();
+            if dev.config_tap_finger_count() > 0 {
+                let _ = dev.config_tap_set_enabled(self.config.input.tap_to_click);
+            }
+            if dev.config_scroll_has_natural_scroll() {
+                let _ = dev.config_scroll_set_natural_scroll_enabled(self.config.input.natural_scroll);
+            }
+        }
     }
 }
