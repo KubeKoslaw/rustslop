@@ -90,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspaces: (0..WORKSPACE_COUNT).map(|_| Workspace::default()).collect(),
         current_ws: 0,
         drag: None,
+        split_ratio: config.general.split_ratio,
         output,
         config,
         session,
