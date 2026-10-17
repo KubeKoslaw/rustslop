@@ -12,6 +12,7 @@ use std::{os::fd::{AsFd, BorrowedFd}, process::Stdio, sync::Arc, time::Duration}
 
 use smithay::{
     desktop::{PopupManager, Space},
+    utils::{Clock, ClockSource, Monotonic},
     xwayland::{X11Wm, XWayland, XWaylandEvent},
     reexports::{
         calloop::{generic::Generic, EventLoop, Interest, Mode, PostAction},
@@ -33,6 +34,10 @@ use smithay::{
         fractional_scale::FractionalScaleManagerState,
         viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
+        idle_inhibit::IdleInhibitManagerState,
+        idle_notify::IdleNotifierState,
+        presentation::PresentationState,
+        session_lock::SessionLockManagerState,
         xwayland_shell::XWaylandShellState,
     },
 };
@@ -92,6 +97,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
         xdg_activation_state: XdgActivationState::new::<State>(&dh),
         xwayland_shell_state: XWaylandShellState::new::<State>(&dh),
+        idle_notifier_state: IdleNotifierState::new(&dh, handle.clone()),
+        idle_inhibit_state: IdleInhibitManagerState::new::<State>(&dh),
+        inhibitors: Vec::new(),
+        session_lock_state: SessionLockManagerState::new::<State, _>(&dh, |_| true),
+        locked: false,
+        lock_surfaces: Vec::new(),
+        presentation_state: PresentationState::new::<State>(&dh, <Monotonic as ClockSource>::ID as u32),
+        clock: Clock::new(),
         xwm: None,
         loop_handle: handle.clone(),
         seat_state,

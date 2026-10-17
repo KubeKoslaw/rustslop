@@ -7,6 +7,7 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use smithay::{
+    desktop::utils::OutputPresentationFeedback,
     backend::{
         allocator::{
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
@@ -21,7 +22,7 @@ use smithay::{
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             element::{
-                memory::MemoryRenderBufferRenderElement, solid::SolidColorRenderElement,
+                memory::MemoryRenderBufferRenderElement,
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
                 Kind,
             },
@@ -44,10 +45,11 @@ use smithay::{
         },
         drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags},
         input::Libinput,
+        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         rustix::fs::OFlags,
         wayland_server::{backend::GlobalId, DisplayHandle},
     },
-    utils::{DeviceFd, Logical, Physical, Point, Transform},
+    utils::{DeviceFd, Logical, Monotonic, Physical, Point, Transform},
     wayland::compositor::with_states,
 };
 
@@ -57,10 +59,11 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 const COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Xrgb8888, Fourcc::Argb8888];
 
+/// Per-frame user data: presentation-time feedback to send when the frame hits the screen.
 type Compositor = DrmCompositor<
     GbmAllocator<DrmDeviceFd>,
     GbmFramebufferExporter<DrmDeviceFd>,
-    (),
+    Option<OutputPresentationFeedback>,
     DrmDeviceFd,
 >;
 
@@ -68,7 +71,7 @@ smithay::backend::renderer::element::render_elements! {
     pub TtyElement<=GlesRenderer>;
     Space = SpaceRenderElements<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>,
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
-    Solid = SolidColorRenderElement,
+    Overlay = super::OverlayElement,
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
 }
 
@@ -201,8 +204,18 @@ impl Tty {
                 DrmEvent::VBlank(crtc) => {
                     let mut gpu = gpu.borrow_mut();
                     let Some(idx) = gpu.heads.iter().position(|h| h.crtc == crtc) else { return };
-                    if let Err(e) = gpu.heads[idx].compositor.frame_submitted() {
-                        tracing::warn!("frame_submitted: {e}");
+                    match gpu.heads[idx].compositor.frame_submitted() {
+                        Ok(Some(Some(mut feedback))) => {
+                            let output = gpu.heads[idx].output.clone();
+                            feedback.presented::<_, Monotonic>(
+                                state.clock.now(),
+                                super::refresh_of(&output),
+                                0,
+                                wp_presentation_feedback::Kind::Vsync | wp_presentation_feedback::Kind::HwCompletion,
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("frame_submitted: {e}"),
                     }
                     gpu.heads[idx].frame_pending = false;
                     render(&mut gpu, state, idx);
@@ -350,8 +363,7 @@ fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
     // Screenshots are rendered offscreen, so they work even while another VT is in front.
     if let Some((path, mon, stream)) = state.pending_shot.take() {
         let target = state.outputs[mon].output.clone();
-        let borders = state.border_elements(&target);
-        let reply = match super::screenshot(&mut gpu.renderer, &target, &state.space, &borders, state.config.background, &path) {
+        let reply = match super::screenshot(&mut gpu.renderer, state, &target, &path) {
             Ok(()) => "ok".to_string(),
             Err(e) => format!("error: {e}"),
         };
@@ -362,8 +374,8 @@ fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
     }
     let output = gpu.heads[idx].output.clone();
     let geo = state.space.output_geometry(&output).unwrap_or_default();
-    let borders = state.border_elements(&output);
-    let background = state.config.background;
+    let overlay = super::overlay_elements(state, &mut gpu.renderer, &output);
+    let background = super::clear_color(state);
     let scale = state.config.general.scale;
     let pointer: Point<f64, Logical> = state.seat.get_pointer().unwrap().current_location();
     // Pointer relative to this output; the cursor is only drawn on the output it is on.
@@ -401,17 +413,21 @@ fn render(gpu: &mut Gpu, state: &mut State, idx: usize) {
             }
         }
     }
-    elements.extend(borders.iter().cloned().map(TtyElement::Solid));
-    match space_render_elements(&mut gpu.renderer, [&state.space], &output, 1.0) {
-        Ok(e) => elements.extend(e.into_iter().map(TtyElement::Space)),
-        Err(e) => tracing::warn!("space render: {e}"),
+    elements.extend(overlay.into_iter().map(TtyElement::Overlay));
+    // While locked the windows are not drawn at all.
+    if !state.locked {
+        match space_render_elements(&mut gpu.renderer, [&state.space], &output, 1.0) {
+            Ok(e) => elements.extend(e.into_iter().map(TtyElement::Space)),
+            Err(e) => tracing::warn!("space render: {e}"),
+        }
     }
 
     let head = &mut gpu.heads[idx];
     match head.compositor.render_frame(&mut gpu.renderer, &elements, background, FrameFlags::DEFAULT) {
         Ok(result) => {
             if !result.is_empty {
-                match head.compositor.queue_frame(()) {
+                let feedback = super::collect_feedback(state, &output, &result.states);
+                match head.compositor.queue_frame(Some(feedback)) {
                     Ok(()) => head.frame_pending = true,
                     Err(e) => tracing::warn!("queue_frame: {e}"),
                 }

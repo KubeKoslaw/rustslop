@@ -276,6 +276,9 @@ impl State {
     }
 
     pub fn focus_window(&mut self, window: &Window) {
+        if self.locked {
+            return;
+        }
         if let Some(mon) = self.mon_of_window(window) {
             self.focused = mon;
         }
@@ -293,6 +296,9 @@ impl State {
 
     /// Give keyboard focus to an arbitrary surface (e.g. a layer-shell launcher).
     pub fn focus_surface(&mut self, surface: WlSurface) {
+        if self.locked {
+            return;
+        }
         let keyboard = self.seat.get_keyboard().unwrap();
         keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
     }
@@ -314,6 +320,10 @@ impl State {
 
     /// Focus the topmost window of the focused monitor, or clear focus if it is empty.
     pub fn focus_top(&mut self) {
+        if self.locked {
+            self.focus_lock_surface();
+            return;
+        }
         let top = self.focused_stack().pop();
         if let Some(w) = top {
             self.focus_window(&w);
@@ -691,6 +701,11 @@ impl State {
         for window in self.space.elements() {
             if self.space.outputs_for_element(window).contains(output) {
                 window.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));
+            }
+        }
+        for (lock_output, lock) in &self.lock_surfaces {
+            if lock_output == output {
+                smithay::desktop::utils::send_frames_surface_tree(lock.wl_surface(), output, time, Some(std::time::Duration::ZERO), |_, _| Some(output.clone()));
             }
         }
         for layer in layer_map_for_output(output).layers() {

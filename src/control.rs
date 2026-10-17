@@ -219,6 +219,7 @@ impl State {
     fn describe(&self) -> String {
         let focused = self.focused_window();
         let mut out = String::new();
+        out += &format!("locked={}\n", self.locked);
         for (n, m) in self.outputs.iter().enumerate() {
             let o = self.space.output_geometry(&m.output).unwrap_or_default();
             out += &format!(

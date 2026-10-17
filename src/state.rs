@@ -5,7 +5,8 @@ use std::os::unix::io::OwnedFd;
 use smithay::wayland::seat::WaylandFocus as _;
 use smithay::{
     backend::{renderer::utils::on_commit_buffer_handler, session::libseat::LibSeatSession},
-    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_fractional_scale, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_compositor, delegate_cursor_shape, delegate_idle_inhibit, delegate_idle_notify, delegate_presentation,
+    delegate_session_lock, delegate_data_control, delegate_fractional_scale, delegate_data_device, delegate_layer_shell, delegate_output,
     delegate_primary_selection, delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xwayland_shell, delegate_xdg_decoration,
     delegate_xdg_shell,
     desktop::{layer_map_for_output, LayerSurface, PopupKind, PopupManager, Space, Window, WindowSurfaceType},
@@ -51,6 +52,10 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         viewporter::ViewporterState,
+        idle_inhibit::IdleInhibitHandler,
+        idle_notify::{IdleNotifierHandler, IdleNotifierState},
+        presentation::PresentationState,
+        session_lock::{LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker},
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
         xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
         cursor_shape::CursorShapeManagerState,
@@ -81,6 +86,18 @@ pub struct State {
     pub fractional_scale_state: FractionalScaleManagerState,
     pub xdg_activation_state: XdgActivationState,
     pub xwayland_shell_state: XWaylandShellState,
+    pub idle_notifier_state: IdleNotifierState<State>,
+    #[allow(dead_code)] // keeps the idle-inhibit global alive
+    pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Surfaces that asked to keep the screen awake (video players).
+    pub inhibitors: Vec<WlSurface>,
+    pub session_lock_state: SessionLockManagerState,
+    /// A session lock (swaylock) is active: only its surfaces are shown and get input.
+    pub locked: bool,
+    pub lock_surfaces: Vec<(Output, LockSurface)>,
+    #[allow(dead_code)] // keeps the presentation-time global alive
+    pub presentation_state: PresentationState,
+    pub clock: smithay::utils::Clock<smithay::utils::Monotonic>,
     /// The X11 window manager, once Xwayland is up.
     pub xwm: Option<X11Wm>,
     pub loop_handle: LoopHandle<'static, State>,
@@ -411,6 +428,74 @@ impl XdgActivationHandler for State {
 
 impl TabletSeatHandler for State {}
 
+impl IdleNotifierHandler for State {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
+        &mut self.idle_notifier_state
+    }
+}
+
+impl IdleInhibitHandler for State {
+    fn inhibit(&mut self, surface: WlSurface) {
+        self.inhibitors.push(surface);
+        self.idle_notifier_state.set_is_inhibited(true);
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        self.inhibitors.retain(|s| s != &surface);
+        self.idle_notifier_state.set_is_inhibited(!self.inhibitors.is_empty());
+    }
+}
+
+impl SessionLockHandler for State {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        if self.locked {
+            return; // dropping the locker tells the second client that it failed
+        }
+        tracing::info!("session locked");
+        self.locked = true;
+        self.drag = None;
+        // Nothing but black is drawn from here on, so locking can be confirmed right away.
+        let keyboard = self.seat.get_keyboard().unwrap();
+        keyboard.set_focus(self, None, smithay::utils::SERIAL_COUNTER.next_serial());
+        confirmation.lock();
+    }
+
+    fn unlock(&mut self) {
+        tracing::info!("session unlocked");
+        self.locked = false;
+        self.lock_surfaces.clear();
+        self.focus_top();
+    }
+
+    fn new_surface(&mut self, surface: LockSurface, wl_output: WlOutput) {
+        let Some(output) = Output::from_resource(&wl_output) else { return };
+        let size = self.space.output_geometry(&output).unwrap_or_default().size;
+        surface.with_pending_state(|s| s.size = Some((size.w as u32, size.h as u32).into()));
+        surface.send_configure();
+        self.lock_surfaces.push((output, surface));
+        self.focus_lock_surface();
+    }
+}
+
+impl State {
+    /// While locked, keyboard focus belongs to the lock surface of the focused output.
+    pub fn focus_lock_surface(&mut self) {
+        let focused = self.focused_output().clone();
+        let target = self
+            .lock_surfaces
+            .iter()
+            .find(|(o, s)| *o == focused && s.alive())
+            .or_else(|| self.lock_surfaces.iter().find(|(_, s)| s.alive()))
+            .map(|(_, s)| s.wl_surface().clone());
+        let keyboard = self.seat.get_keyboard().unwrap();
+        keyboard.set_focus(self, target, smithay::utils::SERIAL_COUNTER.next_serial());
+    }
+}
+
 impl FractionalScaleHandler for State {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
         // Walk up to the root so subsurfaces and popups get the same scale as their window.
@@ -493,6 +578,10 @@ delegate_cursor_shape!(State);
 delegate_fractional_scale!(State);
 delegate_xdg_activation!(State);
 delegate_xwayland_shell!(State);
+delegate_idle_notify!(State);
+delegate_idle_inhibit!(State);
+delegate_session_lock!(State);
+delegate_presentation!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_decoration!(State);
 delegate_layer_shell!(State);

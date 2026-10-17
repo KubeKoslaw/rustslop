@@ -85,6 +85,20 @@ check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)
 $CTL ws next >/dev/null; check "ws next goes to workspace 2" $($CTL info | grep -q "current_ws=2"; echo $?)
 $CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "current_ws=1"; echo $?)
 
+# ---- session lock (ext-session-lock test client stands in for swaylock) ----
+WAYLAND_DISPLAY=$SOCK ./target/debug/examples/lock_client 6 >"$OUT/lock.log" 2>&1 &
+LOCKPID=$!; sleep 3
+check "lock client locked the session" $(grep -q "lock surfaces mapped: 1" "$OUT/lock.log"; echo $?)
+check "info reports locked=true" $($CTL info | grep -q "^locked=true"; echo $?)
+check "no window has focus while locked" $([ "$($CTL info | grep 'app_id=' | grep -c 'focused=true')" = 0 ]; echo $?)
+check "screenshots are refused while locked" $($CTL shot "$OUT/locked.png" | grep -q "locked"; echo $?)
+$CTL focus h >/dev/null; $CTL float >/dev/null
+check "keybind actions do not run on the lock screen's windows" $([ "$($CTL info | grep 'app_id=' | grep -c 'focused=true')" = 0 ]; echo $?)
+wait $LOCKPID
+check "lock client unlocked" $(grep -q "^unlocked" "$OUT/lock.log"; echo $?)
+check "info reports locked=false" $($CTL info | grep -q "^locked=false"; echo $?)
+check "focus returns to a window after unlock" $([ "$($CTL info | grep 'app_id=' | grep -c 'focused=true')" = 1 ]; echo $?)
+
 # ---- Xwayland: a Qt app forced onto the X11 backend ----
 N0=$(n_windows)
 $CTL exec env QT_QPA_PLATFORM=xcb konsole >/dev/null; sleep 6

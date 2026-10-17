@@ -47,6 +47,18 @@ impl State {
     where
         B::Device: 'static,
     {
+        // Any input counts as activity for idle notifiers (swayidle).
+        if matches!(
+            event,
+            InputEvent::Keyboard { .. }
+                | InputEvent::PointerMotion { .. }
+                | InputEvent::PointerMotionAbsolute { .. }
+                | InputEvent::PointerButton { .. }
+                | InputEvent::PointerAxis { .. }
+        ) {
+            let seat = self.seat.clone();
+            self.idle_notifier_state.notify_activity(&seat);
+        }
         match event {
             InputEvent::Keyboard { event } => self.on_keyboard(event.key_code(), event.state(), event.time_msec()),
             InputEvent::PointerMotionAbsolute { event } => {
@@ -81,6 +93,10 @@ impl State {
                 // Raw (unshifted) symbol, so e.g. Shift+1 is still "1".
                 let sym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or(handle.modified_sym()).raw();
                 let sym = normalize_sym(sym);
+                // Keybinds are off while the session is locked (only VT switching above works).
+                if state.locked {
+                    return FilterResult::Forward;
+                }
                 if let Some(b) = state.config.bindings.iter().find(|b| b.matches(mods, sym)) {
                     return FilterResult::Intercept(b.action.clone());
                 }
@@ -129,6 +145,11 @@ impl State {
     fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
         let mon = self.mon_at(pos)?;
         let output = &self.outputs[mon].output;
+        if self.locked {
+            let (_, lock) = self.lock_surfaces.iter().find(|(o, s)| o == output && s.alive())?;
+            let origin = self.space.output_geometry(output)?.loc;
+            return Some((lock.wl_surface().clone(), origin.to_f64()));
+        }
         let output_loc = self.space.output_geometry(output)?.loc;
         let map = layer_map_for_output(output);
         let layer_hit = |layers: &[WlrLayer]| {
@@ -180,7 +201,7 @@ impl State {
         if self.drag.is_none() {
             if let Some(mon) = self.mon_at(pos).filter(|&m| m != self.focused) {
                 self.focused = mon;
-                self.focus_top();
+                self.focus_top(); // the lock surface of that output while locked
             }
         }
         pointer.motion(self, focus, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
@@ -207,6 +228,11 @@ impl State {
         let alt = self.seat.get_keyboard().unwrap().modifier_state().alt;
         let pos = pointer.current_location();
 
+        if self.locked {
+            pointer.button(self, &ButtonEvent { button, state, serial: SERIAL_COUNTER.next_serial(), time });
+            pointer.frame(self);
+            return;
+        }
         if state == ButtonState::Pressed && alt && (button == BTN_LEFT || button == BTN_RIGHT) {
             if let Some(window) = self.space.element_under(pos).map(|(w, _)| w.clone()) {
                 let kind = if button == BTN_LEFT { DragKind::Move } else { DragKind::Resize };
