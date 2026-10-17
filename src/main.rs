@@ -5,6 +5,7 @@ mod control;
 mod cursor;
 mod input;
 mod layout;
+mod schema;
 mod screencopy;
 mod state;
 mod wm;
@@ -57,6 +58,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `rusted-wm --check-config [FILE]`: validate a config file and exit (0 = fine, 1 = problems).
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--dump-schema") {
+        println!("{}", schema::to_json());
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("--check-config") {
         let path = args.get(2).map(std::path::PathBuf::from).unwrap_or_else(Config::path);
         let (config, problems) = Config::load_file(&path, true);

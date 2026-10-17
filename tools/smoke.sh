@@ -109,6 +109,12 @@ check "ws-json for waybar" $($CTL ws-json | grep -q '"text": ".*1.*"'; echo $?)
 $CTL ws next >/dev/null; check "ws next goes to workspace 2" $($CTL info | grep -q "current_ws=2"; echo $?)
 $CTL ws prev >/dev/null; check "ws prev goes back" $($CTL info | grep -q "current_ws=1"; echo $?)
 
+# ---- config tooling ----
+check "--dump-schema prints valid JSON with settings and actions" $(./target/debug/rusted-wm --dump-schema | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['settings'] and d['actions']"; echo $?)
+check "--check-config accepts the shipped configs" $(./target/debug/rusted-wm --check-config contrib/config.rice.toml >/dev/null && ./target/debug/rusted-wm --check-config config.example.toml >/dev/null; echo $?)
+printf '[general]\ngapp = 3\n' > "$OUT/bad.toml"
+check "--check-config fails on a config with problems" $(! ./target/debug/rusted-wm --check-config "$OUT/bad.toml" >/dev/null; echo $?)
+
 # ---- audio actions (fake wpctl / notify-send) ----
 $CTL volume up >/dev/null; sleep 1
 check "volume up calls wpctl set-volume with the step" $(grep -q "set-volume -l 1.00 @DEFAULT_AUDIO_SINK@ 5%+" "$OUT/wpctl.log"; echo $?)

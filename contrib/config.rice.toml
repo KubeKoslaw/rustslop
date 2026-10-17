@@ -21,11 +21,19 @@ autostart = [
 ]
 
 [general]
-terminal = "foot"
 gap = 12
 border = 2
 modifier = "auto"   # super on a real session, alt when nested
 # scale = 1.0
+
+# Default programs: change them here and every bind that uses @name follows
+# (mod+Enter = terminal, mod+d = launcher, mod+b = browser, mod+e = file manager, mod+shift+x = lock).
+[apps]
+terminal = "foot"
+launcher = "fuzzel"
+browser = "firefox"
+file_manager = "dolphin"
+lock = "swaylock -f -c 000000"
 
 [audio]
 step = 5
@@ -38,14 +46,11 @@ tap_to_click = true
 natural_scroll = true
 
 [keybinds]
-# launchers
-"mod+d" = "spawn:fuzzel"
+# launchers (mod+d = @launcher, mod+shift+x = @lock are defaults; see [apps])
 "mod+shift+d" = "spawn:wofi --show drun"
 "mod+c" = "spawn:sh -c 'cliphist list | fuzzel --dmenu | cliphist decode | wl-copy'"
 # window management extras
 "mod+shift+q" = "close"
-# lock the screen
-"mod+shift+x" = "spawn:swaylock -f -c 000000"
 # screenshots (grim + slurp): region to clipboard, whole screen to ~/Pictures
 "mod+shift+s" = "spawn:sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
 "Print" = "spawn:sh -c 'mkdir -p ~/Pictures && grim ~/Pictures/$(date +%F_%H-%M-%S).png'"

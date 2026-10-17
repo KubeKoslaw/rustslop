@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use smithay::{
     backend::renderer::Color32F,
     input::keyboard::{xkb, ModifiersState},
@@ -14,7 +14,7 @@ use smithay::{
 
 use crate::input::Action;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct General {
     pub gap: i32,
@@ -37,7 +37,7 @@ impl Default for General {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Colors {
     pub focused: String,
@@ -52,7 +52,7 @@ impl Default for Colors {
 }
 
 /// Keyboard layout and repeat. Needed on a real TTY, where there is no host compositor to ask.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Input {
     pub layout: String,
@@ -78,8 +78,47 @@ impl Default for Input {
     }
 }
 
+/// Default programs, referenced from keybinds as `spawn:@launcher`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Apps {
+    /// Empty = use `general.terminal`.
+    pub terminal: String,
+    pub launcher: String,
+    pub browser: String,
+    pub file_manager: String,
+    pub lock: String,
+}
+
+impl Default for Apps {
+    fn default() -> Self {
+        Self {
+            terminal: String::new(),
+            launcher: "fuzzel".into(),
+            browser: "xdg-open https://".into(),
+            file_manager: "xdg-open .".into(),
+            lock: "swaylock -f -c 000000".into(),
+        }
+    }
+}
+
+impl Apps {
+    /// Command for `@name`, with the terminal falling back to `general.terminal`.
+    fn resolve(&self, name: &str, general_terminal: &str) -> Option<String> {
+        Some(match name {
+            "terminal" if self.terminal.is_empty() => general_terminal.to_string(),
+            "terminal" => self.terminal.clone(),
+            "launcher" => self.launcher.clone(),
+            "browser" => self.browser.clone(),
+            "file_manager" => self.file_manager.clone(),
+            "lock" => self.lock.clone(),
+            _ => return None,
+        })
+    }
+}
+
 /// Volume / mute actions (`volume-up`, `volume-down`, `volume-mute`, `mic-mute`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Audio {
     /// Percent per key press.
@@ -100,6 +139,7 @@ impl Default for Audio {
 #[serde(default)]
 struct RawConfig {
     audio: Audio,
+    apps: Apps,
     general: General,
     input: Input,
     colors: Colors,
@@ -151,6 +191,10 @@ const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+q", "close"),
     ("mod+tab", "focus-next"),
     ("mod+f", "toggle-floating"),
+    ("mod+d", "spawn:@launcher"),
+    ("mod+b", "spawn:@browser"),
+    ("mod+e", "spawn:@file_manager"),
+    ("mod+shift+x", "spawn:@lock"),
     ("mod+h", "focus-left"),
     ("mod+l", "focus-right"),
     ("mod+k", "focus-up"),
@@ -269,7 +313,7 @@ impl Config {
             if action == "none" {
                 continue;
             }
-            match (parse_binding(key, super_mod), parse_action(action, &raw.general.terminal)) {
+            match (parse_binding(key, super_mod), parse_action(action, &raw.apps, &raw.general.terminal)) {
                 (Ok(mut b), Ok(a)) => {
                     b.action = a;
                     bindings.push(b);
@@ -339,12 +383,8 @@ impl Config {
     }
 }
 
-/// Keys each section accepts. A unit test checks these against `config.example.toml`.
-const TOP_KEYS: &[&str] = &["general", "input", "colors", "audio", "autostart", "keybinds"];
-const AUDIO_KEYS: &[&str] = &["step", "max_volume", "notify"];
-const GENERAL_KEYS: &[&str] = &["gap", "border", "terminal", "split_ratio", "modifier", "scale", "xwayland"];
-const INPUT_KEYS: &[&str] = &["layout", "variant", "options", "repeat_delay", "repeat_rate", "tap_to_click", "natural_scroll"];
-const COLORS_KEYS: &[&str] = &["focused", "unfocused", "background"];
+/// Which keys exist comes from `schema::SETTINGS` (a unit test keeps it in sync with the structs).
+
 
 /// Closest candidate to `name` (a likely typo), if any is close enough.
 fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
@@ -370,20 +410,20 @@ fn suggest<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
 
 /// Report every key the parser would silently ignore.
 fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
+    use crate::schema::{keys_of, SECTIONS, SETTINGS};
     let mut problems = Vec::new();
-    let sections: [(&str, &[&str]); 4] =
-        [("general", GENERAL_KEYS), ("input", INPUT_KEYS), ("colors", COLORS_KEYS), ("audio", AUDIO_KEYS)];
+    let top = keys_of("");
     // Where a known key really lives, to say so when it is in the wrong place.
     let home = |key: &str| -> Option<String> {
-        if TOP_KEYS.contains(&key) {
+        if top.contains(&key) {
             return Some("a top-level key (put it above the first [section])".into());
         }
-        sections.iter().find(|(_, keys)| keys.contains(&key)).map(|(s, _)| format!("a [{s}] key"))
+        SETTINGS.iter().find(|x| x.key == key && !x.section.is_empty()).map(|x| format!("a [{}] key", x.section))
     };
 
     for (key, value) in table {
-        if !TOP_KEYS.contains(&key.as_str()) {
-            let hint = match (home(key), suggest(key, TOP_KEYS)) {
+        if !top.contains(&key.as_str()) {
+            let hint = match (home(key), suggest(key, &top)) {
                 (Some(h), _) => format!(" — it is {h}"),
                 (None, Some(s)) => format!(" — did you mean `{s}`?"),
                 (None, None) => String::new(),
@@ -391,13 +431,16 @@ fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
             problems.push(format!("unknown top-level key `{key}`{hint}; it is ignored"));
             continue;
         }
-        let Some((_, keys)) = sections.iter().find(|(s, _)| s == key) else { continue };
+        if !SECTIONS.contains(&key.as_str()) {
+            continue;
+        }
+        let keys = keys_of(key);
         let Some(inner) = value.as_table() else {
             problems.push(format!("`{key}` must be a [{key}] table"));
             continue;
         };
         for k in inner.keys().filter(|k| !keys.contains(&k.as_str())) {
-            let hint = match (home(k), suggest(k, keys)) {
+            let hint = match (home(k), suggest(k, &keys)) {
                 (Some(h), _) => format!(" — it is {h}, not part of [{key}]"),
                 (None, Some(s)) => format!(" — did you mean `{s}`?"),
                 (None, None) => String::new(),
@@ -455,7 +498,7 @@ pub fn normalize_sym(raw: u32) -> u32 {
     }
 }
 
-fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
+fn parse_action(s: &str, apps: &Apps, terminal: &str) -> Result<Action, String> {
     let (name, arg) = match s.split_once(':') {
         Some((n, a)) => (n.trim(), Some(a.trim())),
         None => (s.trim(), None),
@@ -467,7 +510,18 @@ fn parse_action(s: &str, terminal: &str) -> Result<Action, String> {
         }
     };
     Ok(match name {
-        "spawn" => Action::Exec(arg.unwrap_or(terminal).to_string()),
+        "spawn" => Action::Exec(match arg {
+            None => apps.resolve("terminal", terminal).unwrap_or_default(),
+            // `@launcher`, or `@terminal -e htop`: a default program, optionally with arguments.
+            Some(a) if a.starts_with('@') => {
+                let (name, rest) = a[1..].split_once(' ').unwrap_or((&a[1..], ""));
+                let base = apps.resolve(name, terminal).ok_or_else(|| {
+                    format!("unknown app @{name} (use @terminal, @launcher, @browser, @file_manager or @lock)")
+                })?;
+                if rest.is_empty() { base } else { format!("{base} {rest}") }
+            }
+            Some(a) => a.to_string(),
+        }),
         "close" => Action::Close,
         "focus-next" => Action::FocusNext,
         "focus-left" => Action::FocusDir(-1, 0),
@@ -538,14 +592,76 @@ mod tests {
     #[test]
     fn key_lists_match_the_example_config() {
         let example = include_str!("../config.example.toml");
-        for key in GENERAL_KEYS.iter().chain(INPUT_KEYS).chain(COLORS_KEYS).chain(AUDIO_KEYS) {
-            assert!(example.contains(&format!("{key} =")), "config.example.toml does not document `{key}`");
+        for x in crate::schema::SETTINGS {
+            let documented = example.contains(&format!("{} =", x.key)) || example.contains(&format!("[{}]", x.key));
+            assert!(documented, "config.example.toml does not document `{}`", x.key);
         }
         // And the shipped examples produce no unknown-key complaints.
         for text in [example, include_str!("../contrib/config.rice.toml")] {
             let table: toml::Table = text.parse().unwrap();
             assert!(unknown_key_problems(&table).is_empty());
         }
+    }
+
+    #[test]
+    fn schema_matches_config_structs() {
+        use crate::schema::{keys_of, SETTINGS};
+        let sections: [(&str, toml::Value); 5] = [
+            ("general", toml::Value::try_from(General::default()).unwrap()),
+            ("apps", toml::Value::try_from(Apps::default()).unwrap()),
+            ("input", toml::Value::try_from(Input::default()).unwrap()),
+            ("colors", toml::Value::try_from(Colors::default()).unwrap()),
+            ("audio", toml::Value::try_from(Audio::default()).unwrap()),
+        ];
+        for (name, value) in &sections {
+            let table = value.as_table().unwrap();
+            let mut have: Vec<&str> = table.keys().map(String::as_str).collect();
+            let mut schema = keys_of(name);
+            have.sort();
+            schema.sort();
+            assert_eq!(have, schema, "schema and struct disagree about [{name}]");
+            for x in SETTINGS.iter().filter(|x| x.section == *name) {
+                let expected = format!("v = {}", x.default).parse::<toml::Table>().unwrap().remove("v").unwrap();
+                assert_eq!(table[x.key], expected, "default of {name}.{} differs from the schema", x.key);
+                // And the schema default is accepted without complaints.
+                let (_, problems) = Config::parse(&format!("[{name}]\n{} = {}", x.key, x.default), false);
+                assert!(problems.is_empty(), "{name}.{}: {problems:?}", x.key);
+            }
+        }
+        let json = crate::schema::to_json();
+        assert!(json.starts_with("{\"version\":1") && json.contains("\"key\":\"scale\""));
+    }
+
+    #[test]
+    fn every_listed_action_parses() {
+        for (name, arg) in crate::schema::ACTIONS {
+            let text = match *arg {
+                "N" => format!("{name}:1"),
+                "CMD" => format!("{name}:echo hi"),
+                _ => name.to_string(),
+            };
+            parse_action(&text, &Apps::default(), "foot").unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+    }
+
+    #[test]
+    fn apps_are_referenced_with_at_names() {
+        let text = "[general]\nterminal = \"foot\"\n[apps]\nlauncher = \"wofi --show drun\"\n[keybinds]\n\"mod+x\" = \"spawn:@launcher\"\n\"mod+y\" = \"spawn:@terminal -e htop\"\n\"mod+z\" = \"spawn:@nope\"";
+        let (c, p) = Config::parse(text, false);
+        let exec = |key: &str| {
+            let b = c.bindings.iter().find(|b| b.key == key).unwrap_or_else(|| panic!("no bind {key}"));
+            match &b.action {
+                Action::Exec(cmd) => cmd.clone(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(exec("mod+x"), "wofi --show drun");
+        assert_eq!(exec("mod+y"), "foot -e htop");
+        assert!(p.iter().any(|m| m.contains("unknown app @nope")), "{p:?}");
+        // The default launcher bind follows the [apps] choice, too.
+        let (c2, _) = Config::parse("[apps]\nlauncher = \"rofi -show drun\"", false);
+        let d = c2.bindings.iter().find(|b| b.key == "mod+d").unwrap();
+        assert!(matches!(&d.action, Action::Exec(cmd) if cmd == "rofi -show drun"));
     }
 
     #[test]

@@ -15,6 +15,16 @@ xwayland = true       # run Xwayland for X11 apps (needs the Xwayland binary)
 scale = 1.0           # output scale, fractional allowed (1.25, 1.5, ...)
 modifier = "auto"     # "auto" = super on a real session, alt when nested in another desktop; or "alt"/"super"
 
+# Default programs. Reference them from keybinds as "spawn:@launcher" (optionally with arguments,
+# e.g. "spawn:@terminal -e htop"). Defaults: mod+d launcher, mod+b browser, mod+e file manager,
+# mod+shift+x lock.
+[apps]
+terminal = ""                      # empty = use general.terminal
+launcher = "fuzzel"
+browser = "xdg-open https://"
+file_manager = "xdg-open ."
+lock = "swaylock -f -c 000000"
+
 [input]
 layout = ""           # xkb layout, e.g. "pl" or "us,de" (empty = system default)
 variant = ""
