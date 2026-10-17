@@ -3,7 +3,7 @@
 #   cp contrib/config.rice.toml ~/.config/rusted-wm/config.toml
 #   cp contrib/waybar/* ~/.config/waybar/
 # Needs: pipewire + wireplumber (+ pipewire-pulse), waybar, mako, swaybg, foot, fuzzel; optional: grim + slurp (screenshots),
-# swaylock + swayidle (lock/idle), cliphist + wl-clipboard (clipboard history),
+# swaylock (manual lock; nothing here sleeps or blanks the screen), cliphist + wl-clipboard (clipboard history),
 # brightnessctl, playerctl.
 
 # Started once, through `sh -c` (so $HOME works).
@@ -16,8 +16,6 @@ autostart = [
   "waybar",
   "mako",
   "wl-paste --watch cliphist store",
-  # lock after 5 min, switch screens... (needs swayidle + swaylock)
-  # "swayidle -w timeout 300 'swaylock -f -c 000000'",
 ]
 
 [general]

@@ -1,4 +1,5 @@
 mod audio;
+mod cli;
 mod backend;
 mod config;
 mod control;
@@ -58,6 +59,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `rusted-wm --check-config [FILE]`: validate a config file and exit (0 = fine, 1 = problems).
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("config") {
+        std::process::exit(cli::run(&args[2..]));
+    }
     if args.get(1).map(String::as_str) == Some("--dump-schema") {
         println!("{}", schema::to_json());
         return Ok(());

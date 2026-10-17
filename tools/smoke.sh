@@ -94,6 +94,15 @@ $CTL shot "$OUT/bar.png" >/dev/null
 kill $LPID 2>/dev/null; sleep 1
 check "area restored after bar exits" $($CTL info | grep -q "geo=12,12"; echo $?)
 
+# `rusted-wm config set` edits the file and the running compositor picks it up
+CFG="env RUSTED_CONFIG=$OUT/config.toml WAYLAND_DISPLAY=$SOCK ./target/debug/rusted-wm config"
+$CFG set general.gap 30 >"$OUT/cfgset.log" 2>&1
+check "config set reloads the running compositor (gap 30)" $(grep -q "compositor reloaded" "$OUT/cfgset.log" && $CTL info | grep -q "geo=30,30"; echo $?)
+check "config get reads it back" $([ "$($CFG get general.gap)" = 30 ]; echo $?)
+$CFG unset general.gap >/dev/null 2>&1
+check "config unset restores the default gap" $($CTL info | grep -q "geo=12,12"; echo $?)
+check "config set rejects an out-of-range value" $(! $CFG set general.gap 999 >/dev/null 2>&1; echo $?)
+
 W0=$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')
 printf '[general]\nscale = 2.0\n' > "$OUT/config.toml"; $CTL reload >/dev/null; sleep 1
 check "scale 2 halves the logical output width" $([ "$($CTL info | sed -n 's/^output \([0-9]*\)x.*/\1/p')" = $((W0 / 2)) ]; echo $?)

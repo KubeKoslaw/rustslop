@@ -186,7 +186,7 @@ impl Default for Config {
     }
 }
 
-const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
+pub(crate) const DEFAULT_KEYBINDS: &[(&str, &str)] = &[
     ("mod+return", "spawn"),
     ("mod+q", "close"),
     ("mod+tab", "focus-next"),
@@ -451,7 +451,7 @@ fn unknown_key_problems(table: &toml::Table) -> Vec<String> {
     problems
 }
 
-fn parse_color(s: &str) -> Option<Color32F> {
+pub(crate) fn parse_color(s: &str) -> Option<Color32F> {
     let h = s.strip_prefix('#')?;
     if !(h.len() == 6 || h.len() == 8) || !h.is_ascii() {
         return None;
@@ -460,7 +460,7 @@ fn parse_color(s: &str) -> Option<Color32F> {
     Some(Color32F::new(byte(0)?, byte(2)?, byte(4)?, if h.len() == 8 { byte(6)? } else { 1.0 }))
 }
 
-fn parse_binding(key: &str, super_mod: bool) -> Result<Binding, String> {
+pub(crate) fn parse_binding(key: &str, super_mod: bool) -> Result<Binding, String> {
     let mut b = Binding { key: key.to_string(), logo: false, alt: false, ctrl: false, shift: false, sym: 0, action: Action::Quit };
     let mut sym = None;
     for part in key.split('+').map(str::trim) {
@@ -498,7 +498,7 @@ pub fn normalize_sym(raw: u32) -> u32 {
     }
 }
 
-fn parse_action(s: &str, apps: &Apps, terminal: &str) -> Result<Action, String> {
+pub(crate) fn parse_action(s: &str, apps: &Apps, terminal: &str) -> Result<Action, String> {
     let (name, arg) = match s.split_once(':') {
         Some((n, a)) => (n.trim(), Some(a.trim())),
         None => (s.trim(), None),
