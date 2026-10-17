@@ -77,6 +77,24 @@ pub struct OutputSettings {
     pub position: String,
 }
 
+/// Desktop wallpaper, applied by the session's wallpaper helper (`contrib/rice/wallpaper.py`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Wallpaper {
+    /// Image file; empty keeps the solid `[colors] background`.
+    pub path: String,
+    /// swaybg mode: `fill`, `fit`, `stretch`, `center` or `tile`.
+    pub mode: String,
+}
+
+impl Default for Wallpaper {
+    fn default() -> Self {
+        Self { path: String::new(), mode: "fill".into() }
+    }
+}
+
+pub const WALLPAPER_MODES: &[&str] = &["fill", "fit", "stretch", "center", "tile"];
+
 /// Parse a `"X,Y"` logical position used by `[outputs.NAME]`.
 pub fn parse_output_position(s: &str) -> Result<(i32, i32), String> {
     let (x, y) = s.split_once(',').ok_or_else(|| "expected \"X,Y\" in logical pixels".to_string())?;
@@ -286,6 +304,7 @@ struct RawConfig {
     autostart: Vec<String>,
     /// Per-connector overrides, e.g. `[outputs.DP-1] mode = "1920x1080@75"`.
     outputs: BTreeMap<String, OutputSettings>,
+    wallpaper: Wallpaper,
     /// "mod+shift+1" = "move-to-workspace:1"; merged over the defaults, "none" removes a bind.
     keybinds: BTreeMap<String, String>,
 }
@@ -324,6 +343,9 @@ pub struct Config {
     pub autostart: Vec<String>,
     /// Per-output mode overrides, keyed by connector name.
     pub outputs: BTreeMap<String, OutputSettings>,
+    /// Read by the session helper; parsed here so bad values are reported.
+    #[allow(dead_code)]
+    pub wallpaper: Wallpaper,
     pub bindings: Vec<Binding>,
 }
 
@@ -564,7 +586,16 @@ impl Config {
                 }
             }
         }
-        (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, outputs, bindings }, problems)
+        let mut wallpaper = raw.wallpaper;
+        if !WALLPAPER_MODES.contains(&wallpaper.mode.as_str()) {
+            problems.push(format!(
+                "wallpaper.mode {:?} is not one of {}; using fill",
+                wallpaper.mode,
+                WALLPAPER_MODES.join(", ")
+            ));
+            wallpaper.mode = "fill".into();
+        }
+        (Self { appearance, general, audio, input: raw.input, focused, unfocused, background, pywal_file, autostart: raw.autostart, outputs, wallpaper, bindings }, problems)
     }
 }
 
@@ -839,12 +870,13 @@ mod tests {
     #[test]
     fn schema_matches_config_structs() {
         use crate::schema::{keys_of, SETTINGS};
-        let sections: [(&str, toml::Value); 6] = [
+        let sections: [(&str, toml::Value); 7] = [
             ("appearance", toml::Value::try_from(Appearance::default()).unwrap()),
             ("general", toml::Value::try_from(General::default()).unwrap()),
             ("apps", toml::Value::try_from(Apps::default()).unwrap()),
             ("input", toml::Value::try_from(Input::default()).unwrap()),
             ("colors", toml::Value::try_from(Colors::default()).unwrap()),
+            ("wallpaper", toml::Value::try_from(Wallpaper::default()).unwrap()),
             ("audio", toml::Value::try_from(Audio::default()).unwrap()),
         ];
         for (name, value) in &sections {

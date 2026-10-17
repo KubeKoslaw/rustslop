@@ -12,6 +12,8 @@ pub enum Kind {
     Choice(&'static [&'static str]),
     /// "#rrggbb" or "#rrggbbaa"
     Color,
+    /// A file path; the settings app offers a file picker.
+    File,
     /// Array of strings.
     List,
     /// Table of string -> string.
@@ -81,13 +83,15 @@ pub const SETTINGS: &[Setting] = &[
     s("colors", "pywal_focused", Kind::Choice(PYWAL_COLORS), "\"color4\"", "pywal colour used for the focused border.", false),
     s("colors", "pywal_unfocused", Kind::Choice(PYWAL_COLORS), "\"color8\"", "pywal colour used for other borders.", false),
     s("colors", "pywal_background", Kind::Choice(PYWAL_COLORS), "\"background\"", "pywal colour used for the desktop background.", false),
+    s("wallpaper", "path", Kind::File, "\"\"", "Wallpaper image (PNG, JPEG or WebP); empty keeps the solid background colour.", false),
+    s("wallpaper", "mode", Kind::Choice(&["fill", "fit", "stretch", "center", "tile"]), "\"fill\"", "How the image is scaled to the screen.", false),
     s("audio", "step", Kind::Int { min: 1, max: 50 }, "5", "Percent per volume key press.", false),
     s("audio", "max_volume", Kind::Int { min: 50, max: 150 }, "100", "Volume limit in percent (above 100 = software boost).", false),
     s("audio", "notify", Kind::Bool, "true", "Show the new level with notify-send (needs mako/dunst).", false),
 ];
 
 /// Names of the tables that exist (everything in SETTINGS with a non-empty section).
-pub const SECTIONS: &[&str] = &["general", "apps", "input", "colors", "audio", "appearance"];
+pub const SECTIONS: &[&str] = &["general", "apps", "input", "colors", "wallpaper", "audio", "appearance"];
 
 /// Keys accepted in `section` ("" = top level, where the sections themselves are accepted too).
 pub fn keys_of(section: &str) -> Vec<&'static str> {
@@ -174,6 +178,7 @@ pub fn to_json() -> String {
                 Kind::Text => "\"type\":\"text\"".into(),
                 Kind::Choice(c) => format!("\"type\":\"choice\",\"choices\":[{}]", c.iter().map(|c| json_str(c)).collect::<Vec<_>>().join(",")),
                 Kind::Color => "\"type\":\"color\"".into(),
+                Kind::File => "\"type\":\"file\"".into(),
                 Kind::List => "\"type\":\"list\"".into(),
                 Kind::Map => "\"type\":\"map\"".into(),
             };

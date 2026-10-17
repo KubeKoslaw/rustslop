@@ -83,6 +83,7 @@ def main():
             'appearance.corner_radius':'14','appearance.shadow_enabled':'true','appearance.shadow_size':'24',
             'appearance.shadow_opacity':'0.24','appearance.blur_enabled':'true','appearance.blur_radius':'8',
             'appearance.animations_enabled':'true','appearance.animation_duration_ms':'180',
+            'wallpaper.path':str(rice/'wallpapers/nixos.png'),'wallpaper.mode':'fill',
         }
         for key,value in values.items(): wm('set',key,value)
         before=json.loads(wm('dump'))['autostart']
@@ -91,7 +92,7 @@ def main():
             except ValueError: continue
             if words and (Path(words[0]).name in ('waybar','rusted-waybar','swaybg','mako') or 'waybar.py supervise' in entry):
                 wm('autostart','remove',str(i+1))
-        for entry in ['swaybg -i '+shlex.quote(str(rice/'wallpapers/nixos.png'))+' -m fill', 'python3 '+shlex.quote(str(rice/'waybar.py'))+' supervise','mako']:
+        for entry in ['python3 '+shlex.quote(str(rice/'wallpaper.py')), 'python3 '+shlex.quote(str(rice/'waybar.py'))+' supervise','mako']:
             wm('autostart','add',entry)
         subprocess.run([str(args.wm.resolve()),'--check-config',str(staged)],env=env,check=True)
         payload[cfg]=staged.read_bytes()

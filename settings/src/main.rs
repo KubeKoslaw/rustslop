@@ -16,6 +16,7 @@ const SECTIONS: &[(&str, &str)] = &[
     ("apps", "Default apps"),
     ("input", "Input"),
     ("colors", "Colors"),
+    ("wallpaper", "Wallpaper"),
     ("appearance", "Appearance"),
     ("audio", "Audio"),
 ];
@@ -269,6 +270,62 @@ fn setting_row(ctx: &Shared, schema: &Value) -> gtk::Box {
             button.connect_rgba_notify(move |_| on_change());
             button.upcast()
         }
+        "file" => {
+            let entry = gtk::Entry::builder()
+                .text(value.as_str().unwrap_or(""))
+                .placeholder_text("No wallpaper — the background colour is used")
+                .width_chars(40)
+                .hexpand(true)
+                .valign(gtk::Align::Center)
+                .build();
+            let initial = Rc::new(RefCell::new(entry.text().to_string()));
+            let commit = {
+                let (entry, set_value, initial) = (entry.clone(), set_value.clone(), initial.clone());
+                Rc::new(move || {
+                    let now = entry.text().to_string();
+                    if now != *initial.borrow() {
+                        *initial.borrow_mut() = now.clone();
+                        set_value(now);
+                    }
+                })
+            };
+            let c = commit.clone();
+            entry.connect_activate(move |_| c());
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_leave(move |_| commit());
+            entry.add_controller(focus);
+            let browse = gtk::Button::with_label("Browse…");
+            browse.set_valign(gtk::Align::Center);
+            {
+                let (ctx, entry) = (ctx.clone(), entry.clone());
+                browse.connect_clicked(move |_| {
+                    let dialog = gtk::FileDialog::builder().title("Choose a wallpaper").modal(true).build();
+                    let filter = gtk::FileFilter::new();
+                    filter.set_name(Some("Images"));
+                    for mime in ["image/png", "image/jpeg", "image/webp"] {
+                        filter.add_mime_type(mime);
+                    }
+                    let filters = gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+                    dialog.set_filters(Some(&filters));
+                    dialog.set_default_filter(Some(&filter));
+                    let (set_value, entry) = (set_value.clone(), entry.clone());
+                    dialog.open(Some(&ctx.window), None::<&gio::Cancellable>, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let text = path.display().to_string();
+                                entry.set_text(&text);
+                                set_value(text);
+                            }
+                        }
+                    });
+                });
+            }
+            let row = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
+            row.append(&entry);
+            row.append(&browse);
+            row.upcast()
+        }
         _ => {
             let entry = gtk::Entry::builder().text(value.as_str().unwrap_or("")).width_chars(28).valign(gtk::Align::Center).build();
             let initial = Rc::new(RefCell::new(entry.text().to_string()));
@@ -301,6 +358,96 @@ fn settings_page(ctx: &Shared, section: &str, title: &str) -> gtk::ScrolledWindo
     for s in settings.iter().filter(|s| s["section"] == section) {
         body.append(&setting_row(ctx, s));
         body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    }
+    scrolled(&outer)
+}
+
+/// Directories searched for the "choose a wallpaper" gallery.
+fn wallpaper_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|h| h.join(".config")));
+    let mut dirs = Vec::new();
+    if let Some(config) = config {
+        dirs.push(config.join("rusted-rice/wallpapers"));
+    }
+    if let Some(home) = &home {
+        dirs.push(home.join("Pictures/Wallpapers"));
+    }
+    dirs.push(PathBuf::from("/usr/share/backgrounds"));
+    dirs.into_iter().filter(|d| d.is_dir()).collect()
+}
+
+fn wallpaper_images() -> Vec<PathBuf> {
+    let image = |p: &std::path::Path| {
+        p.is_file()
+            && matches!(
+                p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+                Some("png" | "jpg" | "jpeg" | "webp")
+            )
+    };
+    let mut images = Vec::new();
+    for dir in wallpaper_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let mut here: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| image(p)).collect();
+        here.sort();
+        images.extend(here);
+    }
+    images.truncate(60);
+    images
+}
+
+fn wallpaper_page(ctx: &Shared) -> gtk::ScrolledWindow {
+    let (outer, body) = page("Wallpaper");
+    let settings: Vec<Value> = ctx.schema["settings"].as_array().cloned().unwrap_or_default();
+    for entry in settings.iter().filter(|s| s["section"] == "wallpaper") {
+        body.append(&setting_row(ctx, entry));
+        body.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    }
+    let current = setting_state(ctx, "wallpaper.path")
+        .and_then(|state| state["value"].as_str().map(String::from))
+        .unwrap_or_default();
+    if !current.is_empty() && std::path::Path::new(&current).is_file() {
+        let picture = gtk::Picture::for_filename(&current);
+        picture.set_content_fit(gtk::ContentFit::Cover);
+        picture.set_size_request(520, 240);
+        picture.set_halign(gtk::Align::Start);
+        body.append(&label("Current wallpaper", &["heading"]));
+        body.append(&picture);
+    }
+    body.append(&label("Choose an image", &["heading"]));
+    let images = wallpaper_images();
+    if images.is_empty() {
+        body.append(&label(
+            "No wallpapers found in ~/.config/rusted-rice/wallpapers, ~/Pictures/Wallpapers or /usr/share/backgrounds.",
+            &["dim-label"],
+        ));
+    } else {
+        let flow = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .max_children_per_line(6)
+            .min_children_per_line(2)
+            .column_spacing(10)
+            .row_spacing(10)
+            .build();
+        for path in images {
+            let picture = gtk::Picture::for_filename(&path);
+            picture.set_content_fit(gtk::ContentFit::Cover);
+            picture.set_size_request(150, 84);
+            picture.set_can_shrink(true);
+            let button = gtk::Button::builder().child(&picture).tooltip_text(path.display().to_string()).build();
+            button.add_css_class("flat");
+            if path.display().to_string() == current {
+                button.add_css_class("suggested-action");
+            }
+            let (ctx, text) = (ctx.clone(), path.display().to_string());
+            button.connect_clicked(move |_| {
+                apply(&ctx, vec![vec!["set".into(), "wallpaper.path".into(), text.clone()]], rebuild_all)
+            });
+            flow.append(&button);
+        }
+        body.append(&flow);
     }
     scrolled(&outer)
 }
@@ -596,7 +743,8 @@ fn rebuild_all(ctx: &Shared) {
         ctx.stack.remove(&child);
     }
     for (section, title) in SECTIONS {
-        ctx.stack.add_titled(&settings_page(ctx, section, title), Some(section), title);
+        let page = if *section == "wallpaper" { wallpaper_page(ctx) } else { settings_page(ctx, section, title) };
+        ctx.stack.add_titled(&page, Some(section), title);
     }
     ctx.stack.add_titled(&scrolled(&keybinds_page(ctx)), Some("keybinds"), "Keybinds");
     ctx.stack.add_titled(&scrolled(&autostart_page(ctx)), Some("autostart"), "Autostart");
@@ -649,11 +797,18 @@ fn build_ui(app: &gtk::Application) {
         set_status(&ctx, &format!("{} problem(s) in {path}: {}", problems.len(), problems[0]), true);
     }
     rebuild_all(&ctx);
+    if let Some(page) = std::env::args().skip(1).find_map(|a| a.strip_prefix("--page=").map(String::from)) {
+        if ctx.stack.child_by_name(&page).is_some() {
+            ctx.stack.set_visible_child_name(&page);
+        }
+    }
     window.present();
 }
 
 fn main() -> glib::ExitCode {
     let app = gtk::Application::builder().application_id("org.rusted.Settings").build();
     app.connect_activate(build_ui);
-    app.run()
+    // `--page=NAME` is ours; keep it out of GTK's own argument parsing.
+    let args: Vec<String> = std::env::args().filter(|arg| !arg.starts_with("--page=")).collect();
+    app.run_with_args(&args)
 }

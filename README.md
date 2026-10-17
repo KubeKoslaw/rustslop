@@ -47,7 +47,11 @@ To undo: `python3 contrib/rice/install.py --restore ~/.config/rusted-rice-backup
 Everything installed by the preset lives in `~/.config/rusted-rice` plus the native config dirs it lists.
 
 `rusted-settings` (built from the workspace) edits the same config through the same CLI, with schema-driven
-pages for general options, keybinds, default apps, input, colors, appearance and audio.
+pages for general options, keybinds, default apps, input, colors, wallpaper, appearance and audio. The
+Wallpaper page previews the current image, offers a file picker and thumbnails of everything in
+`~/.config/rusted-rice/wallpapers`, `~/Pictures/Wallpapers` and `/usr/share/backgrounds`. Changes are
+applied live: the rice's `wallpaper.py` watches `[wallpaper]` and restarts swaybg (`--page=wallpaper`
+opens that page directly).
 
 ## Testing
 `tools/smoke.sh` drives a nested instance through its control socket (`tools/ctl.py`) and checks tiling,

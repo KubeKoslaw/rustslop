@@ -153,7 +153,7 @@ fn typed_value(setting: &Setting, raw: &str) -> Result<Value, String> {
             "false" | "no" | "off" | "0" => Value::from(false),
             _ => return Err(format!("{name} is true or false, got `{raw}`")),
         },
-        Kind::Text => Value::from(raw),
+        Kind::Text | Kind::File => Value::from(raw),
         Kind::Choice(choices) => {
             if !choices.contains(&raw) {
                 return Err(format!("{name} must be one of {}, got `{raw}`", choices.join(", ")));

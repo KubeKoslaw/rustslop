@@ -77,6 +77,12 @@ notify = true       # show the new level with notify-send (needs mako/dunst)
 # "mod+tab" = "none"
 
 # Optional effects (live reload; off by default for compatibility).
+# Desktop wallpaper. The rice's wallpaper.py watches this section and restarts swaybg when it
+# changes, so the settings app applies a new image live. Empty path = the [colors] background.
+[wallpaper]
+path = ""            # image file (PNG, JPEG or WebP)
+mode = "fill"        # fill, fit, stretch, center or tile
+
 [appearance]
 corner_radius = 0
 shadow_enabled = false

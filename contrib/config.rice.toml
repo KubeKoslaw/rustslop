@@ -13,7 +13,7 @@ autostart = [
   "sh -c 'pgrep -x pipewire >/dev/null || pipewire'",
   "sh -c 'pgrep -x wireplumber >/dev/null || wireplumber'",
   "sh -c 'pgrep -x pipewire-pulse >/dev/null || pipewire-pulse'",
-  "swaybg -i \"$HOME/.config/rusted-rice/wallpapers/nixos.png\" -m fill",
+  "python3 ~/.config/rusted-rice/wallpaper.py",
   "python3 ~/.config/rusted-rice/waybar.py supervise",
   "mako",
   "wl-paste --watch cliphist store",
@@ -24,6 +24,10 @@ gap = 12
 border = 2
 modifier = "auto"   # super on a real session, alt when nested
 # scale = 1.0
+
+[wallpaper]
+path = "~/.config/rusted-rice/wallpapers/nixos.png"
+mode = "fill"
 
 # Default programs: change them here and every bind that uses @name follows
 # (mod+Enter = terminal, mod+d = launcher, mod+b = browser, mod+e = file manager, mod+shift+x = lock, mod+s = settings).
