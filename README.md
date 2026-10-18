@@ -1,6 +1,6 @@
 # rustslop
 yet another desktop manager ( but in rust ) 
-fun project for personal config and llm testinng
+fun project for personal config and llm testing
 
 A tiling + floating Wayland compositor written in Rust on [Smithay](https://github.com/Smithay/smithay).
 
